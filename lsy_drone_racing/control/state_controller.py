@@ -53,6 +53,7 @@ class StateController(Controller):
                 [0.5, -0.75, 1.2],
             ]
         )
+        
         self._t_total = 15  # s
         t = np.linspace(0, self._t_total, len(waypoints))
         self._des_pos_spline = CubicSpline(t, waypoints)
@@ -81,6 +82,8 @@ class StateController(Controller):
         des_pos = self._des_pos_spline(t)
         action = np.concatenate((des_pos, np.zeros(10)), dtype=np.float32)
         return action
+    
+
 
     def step_callback(
         self,

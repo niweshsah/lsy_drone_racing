@@ -10,8 +10,24 @@ Look for instructions in `README.md` and in the official documentation.
 from __future__ import annotations
 
 import logging
+import os  # <-- 1. Import os
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+# --- Suppress C++ DLPack warnings ---
+# 2. Add this BEFORE importing jax, gymnasium, etc.
+# This filters out C++ level WARNING messages.
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+os.environ["JAX_PLATFORM_NAME"] = "cpu"  # Forces JAX to use CPU
+# ------------------------------------
+
+# --- Force JAX to CPU (avoid GPU warning if CUDA jaxlib is not installed) ---
+os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/dev/null'
+
+# --- Suppress RuntimeWarnings (like overflow) from JAX ---
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
 
 import fire
 import gymnasium
@@ -76,6 +92,11 @@ def simulate(
     ep_times = []
     for _ in range(n_runs):  # Run n_runs episodes with the controller
         obs, info = env.reset()
+        print()
+        print("checking obs", obs)
+        print()
+        
+        # print("checking info", info)
         controller: Controller = controller_cls(obs, info, config)
         i = 0
         fps = 60
