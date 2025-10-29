@@ -46,37 +46,35 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-# /lsy_drone_racing/lsy_drone_racing/control/my_controllers/niwesh_controller7.py
 def simulate(
     config: str = "level0.toml",
     controller: str | None = None,
     n_runs: int = 1,
     render: bool | None = None,
+    camera_view: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # <-- New argument
 ) -> list[float]:
     """Evaluate the drone controller over multiple episodes.
 
     Args:
-        config: The path to the configuration file. Assumes the file is in `config/`.
-        controller: The name of the controller file in `lsy_drone_racing/control/` or None. If None,
-            the controller specified in the config file is used.
-        n_runs: The number of episodes.
-        render: Enable/disable rendering the simulation.
-
-    Returns:
-        A list of episode times.
+        config: The path to the configuration file.
+        controller: Controller file name or None.
+        n_runs: Number of episodes.
+        render: Enable/disable rendering.
+        camera_view: Optional camera settings [distance, azimuth, elevation, lookat_x, lookat_y, lookat_z].
     """
-    # Load configuration and check if firmare should be used.
+    # Load configuration
     config = load_config(Path(__file__).parents[1] / "config" / config)
     if render is None:
         render = config.sim.render
     else:
         config.sim.render = render
-    # Load the controller module
+
+    # Load the controller
     control_path = Path(__file__).parents[1] / "lsy_drone_racing/control"
     controller_path = control_path / (controller or config.controller.file)
-    controller_cls = load_controller(controller_path)  # This returns a class, not an instance
-    # Create the racing environment
+    controller_cls = load_controller(controller_path)
+
+    # Create the environment
     env: DroneRaceEnv = gymnasium.make(
         config.env.id,
         freq=config.env.freq,
@@ -90,49 +88,48 @@ def simulate(
     )
     env = JaxToNumpy(env)
 
+    # Set camera view dynamically
+    if camera_view is not None:
+        try:
+            env.sim.set_camera_view(*camera_view)  # This function depends on your sim backend
+        except AttributeError:
+            print(
+                "[Warning] Camera view could not be set dynamically. Make sure your simulator supports `set_camera_view`."
+            )
+
     ep_times = []
-    for _ in range(n_runs):  # Run n_runs episodes with the controller
+    for _ in range(n_runs):
         obs, info = env.reset()
-        # print()
-        # print("checking obs", obs)
-        # print()
-        
-        # print("checking info", info)
         controller: Controller = controller_cls(obs, info, config)
         i = 0
         fps = 60
 
         while True:
             curr_time = i / config.env.freq
-
             action = controller.compute_control(obs, info)
-            # Convert to a buffer that meets XLA's alginment restrictions to prevent warnings. See
-            # https://github.com/jax-ml/jax/discussions/6055
-            # Tracking issue:
-            # https://github.com/jax-ml/jax/issues/29810
             action = np.asarray(jp.asarray(action), copy=True)
 
             obs, reward, terminated, truncated, info = env.step(action)
-            # Update the controller internal state and models.
             controller_finished = controller.step_callback(
                 action, obs, reward, terminated, truncated, info
             )
-            # Add up reward, collisions
             if terminated or truncated or controller_finished:
                 break
-            if config.sim.render:  # Render the sim if selected.
+
+            if config.sim.render:
                 if ((i * fps) % config.env.freq) < fps:
                     env.render()
+
             i += 1
 
-        controller.episode_callback()  # Update the controller internal state and models.
+        controller.episode_callback()
         log_episode_stats(obs, info, config, curr_time)
         controller.episode_reset()
         ep_times.append(curr_time if obs["target_gate"] == -1 else None)
 
-    # Close the environment
     env.close()
     return ep_times
+
 
 
 def log_episode_stats(obs: dict, info: dict, config: ConfigDict, curr_time: float):

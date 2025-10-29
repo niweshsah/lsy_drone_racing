@@ -81,6 +81,9 @@ class StateController(Controller):
 
         des_pos = self._des_pos_spline(t)
         action = np.concatenate((des_pos, np.zeros(10)), dtype=np.float32)
+        
+        # print("\naction: ", action)
+        # print()
         return action
     
 
