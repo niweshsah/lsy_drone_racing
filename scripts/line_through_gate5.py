@@ -233,3 +233,4 @@ if __name__ == "__main__":
     logging.getLogger("lsy_drone_racing").setLevel(logging.INFO)
     logger.setLevel(logging.INFO)
     fire.Fire(simulate)
+    

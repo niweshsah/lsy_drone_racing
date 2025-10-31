@@ -47,7 +47,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# /lsy_drone_racing/lsy_drone_racing/control/my_controllers/niwesh_controller7.py
 def simulate(
     config: str = "level0.toml",
     controller: str | None = None,
