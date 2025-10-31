@@ -20,7 +20,7 @@ class SmartPathController(Controller):
     """
 
     # --- Controller constants ---
-    TRAJECTORY_DURATION = 25.0  # seconds
+    TRAJECTORY_DURATION = 30.0  # seconds
     STATE_DIM = 13              # total drone state dimension
     OBSTACLE_BUFFER = 0.3       # safety margin around obstacles (in meters)
     TRAJECTORY_SAMPLES = 100    # number of samples for visualization
