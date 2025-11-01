@@ -29,10 +29,11 @@ if TYPE_CHECKING:
 
 
 class SplineTrajectoryController(Controller):
+
     # === Controller Configuration Constants ===
 
     # Total time allotted to complete the entire trajectory (in seconds).
-    TRAJECTORY_DURATION = 20.0
+    TRAJECTORY_DURATION = 17.0
     
     # Expected dimension of the state vector (pos, vel, acc, yaw, rates).
     STATE_DIMENSION = 13
