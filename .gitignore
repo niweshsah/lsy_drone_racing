@@ -1,0 +1,20 @@
+.vscode/
+**.egg-info/
+**/__pycache__/
+submission.csv
+logs
+secrets
+**/*.secret
+saves
+.pytest_cache
+**/*.json
+**/*.csv
+plots/
+c_generated_code/
+/build
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+ros_ws/
+acados/
