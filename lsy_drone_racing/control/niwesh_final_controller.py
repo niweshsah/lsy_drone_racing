@@ -4,10 +4,7 @@ Spline Trajectory Controller for Drone Racing
 Description:
   This module defines a controller for autonomous drone racing. It generates
   a smooth, 3D trajectory through a series of gates using cubic spline 
-  interpolation. The controller features dynamic replanning to adapt to 
-  environment changes (e.g., moving gates) and includes logic for 
-  obstacle avoidance and intelligent waypoint insertion to handle sharp, 
-  backtracking turns.
+  interpolation.
 """
 from __future__ import annotations
 
@@ -32,22 +29,10 @@ if TYPE_CHECKING:
 
 
 class SplineTrajectoryController(Controller):
-    """
-    A trajectory-following controller using cubic splines for smooth path generation.
-
-    This controller plans a complete trajectory at initialization and can
-    dynamically replan if the environment changes. The planning process
-    involves several key steps:
-    1.  Calculate initial waypoints (entry/exit points) for each gate.
-    2.  Insert "detour" waypoints to handle sharp, backtracking turns.
-    3.  Adjust waypoints to avoid collisions with cylindrical obstacles.
-    4.  Generate a final, time-parameterized CubicSpline trajectory.
-    """
-
     # === Controller Configuration Constants ===
 
     # Total time allotted to complete the entire trajectory (in seconds).
-    TRAJECTORY_DURATION = 25.0
+    TRAJECTORY_DURATION = 20.0
     
     # Expected dimension of the state vector (pos, vel, acc, yaw, rates).
     STATE_DIMENSION = 13
