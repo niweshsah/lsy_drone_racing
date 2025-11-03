@@ -88,25 +88,20 @@ class TrajectoryController(Controller):
         # print(f"{closest_obstacle_pos=}, {np.linalg.norm(closest_obstacle_pos - target_pos_xy)=}")
         distance_to_obstacle = np.linalg.norm(closest_obstacle_pos - target_pos_xy)
         if distance_to_obstacle < min_obstacle_dist:
-            print(f"Too close to an obstacle! {target_pos=}, {distance_to_obstacle=}")
             # Move outwards to avoid obstacle
             normal_vector = closest_obstacle_pos - target_pos
             normal_vector[2] = 0  # Only move in x-y plane
             normal_vector /= np.linalg.norm(normal_vector) + 1e-6
-            print(f"Normal vector: {normal_vector}")
             target_pos_delta = normal_vector * (distance_to_obstacle - min_obstacle_dist)
-            print(f"{target_pos=}, {target_pos + target_pos_delta=}")
             target_pos += target_pos_delta
 
         #### Gate hit avoidance
         min_gate_dist = 0.2
         closest_gate_id = np.argmin(np.linalg.norm(obs["gates_pos"] - target_pos, axis=-1))
         gates_visited = np.array([*obs["gates_visited"], False])
-        print(f"{gates_visited=}")
         next_gate_id = np.where(~gates_visited)[0][0]
         if next_gate_id >= len(obs["gates_pos"]):
             next_gate_id = len(obs["gates_pos"]) - 1
-        print(next_gate_id)
         target_pos_xy = target_pos.copy()
         target_pos_xy[2] = 0
         # Compute gate edges from gate_quat and known width
@@ -141,9 +136,6 @@ class TrajectoryController(Controller):
 
         # If too close to either gate edge, project target_pos onto the gate center line (between gate_edge1 and gate_edge2)
         if distance_to_gate_edge1 < min_gate_dist or distance_to_gate_edge2 < min_gate_dist:
-            print(
-                f"Too close to gate edge! {target_pos=}, {distance_to_gate_edge1=}, {distance_to_gate_edge2=}"
-            )
             # Move target_pos onto the gate center line using gate normal
             gate_center_line_point = gate_center_xy
             # Project target_pos_xy onto the gate center line (defined by gate_center_xy and gate_norm in x-y)
@@ -155,7 +147,6 @@ class TrajectoryController(Controller):
             proj_point = gate_center_line_point + gate_norm_xy * proj_length
             # Set target_pos x-y to projected point, keep z unchanged
             target_pos[:2] = proj_point[:2]
-            print(f"Moved target_pos onto gate center line using gate normal: {target_pos}")
 
         # --- Upper and lower gate bar avoidance ---
         # Assume gate height is known (e.g., 0.4m)
@@ -175,19 +166,14 @@ class TrajectoryController(Controller):
         if (
             distance_to_upper_bar < min_gate_dist or distance_to_lower_bar < min_gate_dist
         ) and np.linalg.norm(gate_pos - target_pos) < 1.0:
-            print(
-                f"Too close to gate bar! {target_pos[2]=}, {gate_pos[2]=}, {distance_to_upper_bar=}, {distance_to_lower_bar=}"
-            )
             # Move target_pos z to gate center z
             self.delta_z = smoothing_factor * self.delta_z + (1 - smoothing_factor) * (
                 gate_pos[2] - target_pos[2]
             )
             target_pos[2] += self.delta_z
-            print(f"Moved target_pos onto gate center z: {target_pos}, {self.delta_z=}")
         else:
             self.delta_z *= smoothing_factor
 
-        print(f"{gate_pos=}, {gate_edge1=}, {gate_edge2=}")
         if i >= self.t_total:  # Maximum duration reached
             self._finished = True
         return np.concatenate((target_pos, np.zeros(10)), dtype=np.float32)
