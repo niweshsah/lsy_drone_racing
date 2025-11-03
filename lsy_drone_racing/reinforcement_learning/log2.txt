@@ -1,0 +1,227 @@
+TODO:
+    Step1: generate random gates around drone, train the drone to pass through
+    Step2: generate random obstacles in between
+    Step3: transfer to real racing course
+
+Training Record:
+
+Train: lesson 1.0, random gates around, no random yaw
+    time: Jun 8 00:40
+    n_envs: 20
+    steps: 400000
+    duration: 13.5min
+    changes:
+    result: hover at a low position
+    comments: 
+
+Train: lesson 1.1
+    time: Jun 8 01:00
+    n_envs: 20
+    steps: 400000
+    duration: 13min
+    changes: +k_gate -k_success -k_crash --k_vel
+    result: still staying at a low position
+    comments: 
+
+Train: lesson 1.2
+    time: Jun 8 01:22
+    n_envs: 20
+    steps: 400000
+    duration: 13min
+    changes: +k_center +k_success +k_vel(reward)
+    result: keep altitude, but fly away from gate
+    comments: decrease crash punish?
+
+Train: lesson 1.3
+    time: Jun 8 01:48
+    n_envs: 20
+    steps: 400000
+    duration: 11min
+    changes: -k_crash +k_pos
+    result: much better, start to approach gates
+    comments: position reward seems to be important at the beginning
+
+Train: lesson 1.4
+    time: Jun 8 02:07
+    n_envs: 20
+    steps: 400000
+    duration: 9min
+    changes: +k_crash , decrease vertical random range
+    result: perfect~ 100% success rate
+    comments: make it harder!
+
+Train: lesson 1.5
+    time: Jun 8 02:24
+    n_envs: 20
+    steps: 400000
+    duration: 9min
+    changes: +random range
+    result: doing good~
+    comments: one more time
+
+Train: lesson 1.6
+    time: Jun 8 02:38
+    n_envs: 20
+    steps: 400000
+    duration: 10min
+    changes: +random range -k_pos +k_crash
+    result: 100% success rate
+    comments: time to add obstacles, and ...  I seemed to have never put r_pos in total reward >_<!
+
+Train: lesson 2.1 introduce obstacles
+    time: Jun 8 04:02
+    n_envs: 20
+    steps: 400000
+    duration: 12min
+    changes: --r_pos +r_obst +obstacle observation: gaussian vector length
+    result: nothing changed
+    comments: should increase k_obst and d_safe
+
+Train: lesson 2.2
+    time: Jun 8 04:20
+    n_envs: 20
+    steps: 2 * 6 * 400000
+    duration: 1h18min
+    changes: +d_safe +random
+    result: didn't learn to avoid collision
+    comments: apply velocity punishment? increase difficulty? make obstacle always in the way?
+
+Train: lesson 2.3
+    time: Jun 8 12:20
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 20min
+    changes: +d_safe -k_vel -ang_range +k_crash +k_obst ++k_obst_d +k_success
+    result: improved a little, keep training
+    comments:
+
+Train: lesson 2.4
+    time: Jun 8 13:00
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 20min
+    changes: -k_vel +k_obst +k_obst_d
+    result: can bypass obstacle sometime
+    comments: increase crashing penalty, prevent ending episode early by emergent crashing
+
+Train: lesson 2.5
+    time: Jun 8 13:32
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 22min
+    changes: -k_vel -k_obst -k_obst_d +k_crash
+    result: can successfully avoid collision in many cases
+    comments: keep training
+
+Train: lesson 2.6
+    time: Jun 8 14:08
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 20min
+    changes: 
+    result: not bad, but sometimes detours from wrong side, and flies way too fast (up to 3m/s)
+    comments: increase crash penalty and living reward, r_center is way too small (1e-20) but I'll leave it for now
+
+Train: lesson 2.7
+    time: Jun 8 15:05
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 20min
+    changes: change velocity reward directly compute from state, -k_vel(*50) +k_crash +k_success +r +k_act, penalize vel more weighted by r_obst
+    result: seldom weird behaviour, sometimes cannot choose the correct side to detour
+    comments: increase velocity penalty and keep training
+
+Train: lesson 2.8
+    time: Jun 8 15:35
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 27min
+    changes: -k_vel 
+    result: sometimes learnt to slow down, but still connot get over difficult obstacle
+    comments: maybe consider add random velocity initialization?
+
+Train: lesson 2.9
+    time: Jun 8 16:56
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 27min
+    changes: -k_vel 
+    result: better, occasionally emergent crash
+    comments: 
+
+Train: lesson 2.10
+    time: Jun 8 18:08
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 30min
+    changes: weighted r_obst_d, -k_obst +k_obst_d
+    result: less crashing, but very often pick the wrong side
+    comments: add r_center? and handle r_center problem, should not normalize 
+
+Train: lesson 2.11
+    time: Jun 8 19:33
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 30min
+    changes: +k_center -k_obst -k_obst_d +random, without rel_gate_pos normalization, reinplement r_center
+    result: sometimes fly away
+    comments: need decrease r_obst_d
+
+Train: lesson 2.12
+    time: Jun 8 20:16
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 30min
+    changes: +k_center -k_obst_d +k_success
+    result: doing better, but occasionally fly away
+    comments: increase k_obst, decrease k_obst_d, maybe one more round and then real env
+
+Train: lesson 2.13
+    time: Jun 8 21:02
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 30min
+    changes: +k_obst -k_obst_d
+    result: not bad. but I still want to try distance version of r_center
+    comments: do one more 10min train
+
+Train: lesson 2.14
+    time: Jun 8 21:32
+    n_envs: 20
+    steps: 400000
+    duration: 10min
+    changes: r_center based on distance to gate norm line
+    result: ok
+    comments: next lesson
+
+Train: lesson 3.1 drone racing environment!
+    time: Jun 8 22:52
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 30min
+    changes: switch to drone racing, fix obstacle distance compute error
+    result: moving very slow, start to climb after passing first gate like before
+    comments: must do random initialization, reset model
+
+Train: lesson 3.2 random initialization
+    time: Jun 9 01:10
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 15min
+    changes: init drone at arbitrary position on racing course, reset to 3.0
+    result: idk, looks better
+    comments: I'll reset again and train it overnight
+
+Train: lesson 3.3 extra obstacles
+    time: Jun 9 01:45
+    n_envs: 20
+    steps: 24 * 400000
+    duration: 2.8h
+    changes: add extra pillars between the first and second gates, prevent it from developing weird trajectory
+    result: can't even pass the first gate
+    comments: I give up
+
+Thinking: 
+    the main problem this time is that I end the episode upon crossing a gate. So it learnt to pass at extremely high speed, and thus not stable.
+    I should start from hovering instead of just flying into gates.
+    And I'll try imitation learning as well.

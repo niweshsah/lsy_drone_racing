@@ -1,0 +1,38 @@
+Problem Statement: (same as midterm)
+    Key difficulties:
+        Obstacle avoidance
+        Gate position changes
+        OCP Problem too complex
+        Too many parameters
+Core ideas:
+    System Design:
+        MPCC:
+            autonomous velocity allocation, knows when to slow down
+        Obstacle Costs: 
+            Gaussian based distance cost
+            trick: supress q_c to allow avoidance behaviour
+        Trajectory Translation:
+            no need to do spline based real-time replan
+            simply move the whole trajectory in the direction of gate offset
+            trick: do smooth transition with gaussian
+    Tuning:
+        Bayesian Optimization for Parameter Tuning
+Results & Ablations:
+    Online Competition:
+        6/10 4.7s
+    Sim:
+        Pareto Front Plot - success rate vs. lap time
+        Violin Plot - lap time consistency
+        Video for each gates
+        Ablations
+            smooth transition vs. direct translation
+            bayesian optimization vs. random search
+    Real:
+        Robustness in real world
+        Lap time (success rate?)
+            average 7s with different layouts (Videos)
+Planned Milestons:
+    refer to midterm
+Conclusions:
+    mpc implementation experiences
+    sim2real gap can be huge

@@ -1,0 +1,32 @@
+27.05 00:50 step2: hover at the 1st real gate | 50000 step = 6min
+27.05 01:27 add yaw panelty | 100000 step = 8min
+27.05 01:38 set k_yaw to 0.05| 100000 step = 8min
+27.05 01:56 first deploy on racing| 200000 step = 15min
+27.05 02:25 2nd racing with center penalty| 100000 step = 8min | failed only crashing
+27.05 02:44 2nd racing add r_living & r_success| 100000 step = 8min | failed only crashing
+27.05 02:54 2nd racing +r_crash -r_center | 100000 step = 8min | pass but crash right after
+27.05 03:12 3nd racing +r_crash +r_living +r_yaw | 1000000 step = 80min
+27.05 15:42 change imitation strategy to follow ref_waypoint | 100000 step = 8min
+27.05 16:31 parallelize 10 envs | 100000 step = 4min | fly in inverse direction reset to last model
+27.05 16:52 add tracking pos reward parallelize 20 envs| 100000 step = 3min | wrong sign, reset
+27.05 17:05 add tracking pos reward fixed sign | 100000 step = 3min | getting better
+27.05 17:15 tracking pos imitation, try 30 envs | 200000 step = 3min | bypassing gate
+27.05 18:38 -k_gate -k_imit +k_center, 32 envs | 400000 step = 9min 
+27.05 19:11 cut_idx find ref_waypoint only on not visited waypoints, 32 envs | 400000 step = 8min 
+27.05 19:25 -k_imit +k_center +k_gate, 20 envs | 300000 step = 6min 
+27.05 19:40 -k_imit -k_imit_p, 32 envs | 300000 step = 6min 
+27.05 19:50 -k_success, 20 envs | 600000 step = 11min | agent scares of gate 
+27.05 23:57 reset to pass first gate, 20 envs | 400000 step = 10min | fly very high
+28.05 00:16 reset to pass first gate, --r_imit | 400000 step = 9min | not bad, but still crash after passing
+how to do imitation learning? follow points? compare actions? KL-divergence?
+28.05 00:38 train without imitation | 2*6*400000 step = 2h | stopped at 1200000, pass then climb high
+28.05 01:22 +r_vel | 2*6*400000 step = 1.5h | finished race but weird behaviour at 2nd gate
+28.05 21:55 level2 +r_gates_direction | 4*400000 step = 35min | learnt to fly slowly, success rate increased in level2
+28.05 22:50 +r_gates_direction | 2*400000 step = 17min | better but cannot get rid of this behaviour
+28.05 23:20 reset to model_gate_center +r_gates_direction | 2*470588 step = 20min | chaos, not passing the first gate
+28.05 23:58 reset to pass_first_gate -r_gates_direction +r_vel(addtionally penalize vertical) | 2*470588 step = 20min | hover in front of the gate 
+29.05 00:24 reset to pass_first_gate -r_gates_direction(k & effective angle) | 2*470588 step = 20min | not working
+29.05 01:52 reset to pass_first_gate +r_vertical_vel +r_fake_goal | 1*470588 step = 10min |
+
+
+

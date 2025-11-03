@@ -1,0 +1,359 @@
+TODO:
+    Start from hovering at gate center. Set episode length to 500, let it hover till the end.
+    Also do imitation learning, use PID (for robustness) with attitude output as teacher policy, run simultaneously and compare output.
+
+Train: lesson 1.0 Hover at gate
+    time: Jun 10 06:07
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 20min
+    changes: hover
+    result: flying to gate but unstable
+    comments: param works, keep training
+
+Train: lesson 1.1
+    time: Jun 10 07:21
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: 
+    result: fly and hover half meter in front of the gate, will do 
+    comments: move to next lesson
+
+Train: lesson 2.1 with obstacles
+    time: Jun 10 07:21
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 27min
+    changes: 
+    result: avoid obstacles sometimes, still not going into the gate
+    comments: increase k_gate
+
+Train: lesson 2.2
+    time: Jun 10 12:02
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 18min
+    changes: +k_gate -k_gate_pos -k_obst -k_obst_d ++k_success
+    result: afraid of going through the gate
+    comments: decrease r, increase k_gate
+
+Train: lesson 2.3
+    time: Jun 10 12:37
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 18min
+    changes: +k_gate -r
+    result: still afraid, but better collision avoidance
+    comments: try next lesson in racing environment
+
+Train: lesson 3.1 Racing environment with imitation learning
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: +k_gate -r
+    result: still stop in front of the gates?? why?
+    comments: perhaps caused by r_center 
+
+Train: lesson 3.2 Racing environment with imitation learning
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: -r_center
+    result: still stop
+    comments: 
+
+Train: lesson 3.3 Racing environment with imitation learning
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: +k_vel +k_imit +k_success
+    result: just won't get in the fxxking gate
+    comments: I might just try start from scratch
+
+Train: lesson 4.0 Racing environment with imitation learning from scratch
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 56min
+    changes: recreate model
+    result: works pretty nice! able to pass four gates! However directly crashes on original takeoff position.
+    comments: I'll add original start position and retrain a model.
+
+Train: lesson 4.1 Racing environment with imitation learning from scratch
+    n_envs: 20
+    steps: 12 * 400000
+    duration: 86min
+    changes: add takeoff position, + k_vel
+    result: moving faster, but not stable 
+    comments: 
+
+Train: lesson 4.2 Racing environment with random gate
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: remove imitation learning, add random gates
+    result: 
+    comments: 
+
+Train: lesson 4.3 Racing environment Level 2 
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 17min
+    changes: remove imitation learning, add random gates
+    result: working fine observed success rate over 50%, avg 6s
+    comments: keep going
+    
+Train: lesson 4.4 Racing environment Level 2 
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 17min
+    changes: add finish reward, remove rand init, +k_vel, but flip k_vel at 3rd gate
+    result: rush even longer after passing 3rd gate
+    comments: add more panalty for 3rd gate
+    
+Train: lesson 4.5 Racing environment Level 2 (reset to 4.3)
+    n_envs: 20
+    steps: 3 * 400000
+    duration: 17min
+    changes: +k_vel, flip k_vel at 3rd and 4rd gate, and add panalty
+    result: success rate high, but too fast at first 2 gates. and stil rushing to far
+    comments: slower
+
+Train: lesson 4.6 Racing environment Level 2 (reset to 4.3)
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 34min
+    changes: -k_vel, with gate 3 special penalty
+    result: still too fast
+    comments: keep slowing down
+
+Train: lesson 4.7 Racing environment Level 2 (reset to 4.3)
+    n_envs: 20
+    steps: 4 * 400000
+    duration: 34min
+    changes: -k_vel, with heavier penalty, lap time based finish reward
+    result: it worked! finally not rushing too much, not stable enough
+    comments: I say keep doing this for 1M
+
+Train: lesson 4.8 Racing environment Level 2
+    n_envs: 20
+    steps: 2 * 400000
+    duration: 17min
+    changes: -k_vel, with heavier penalty, lap time based finish reward
+    result: success rate increased a bit
+    comments: keep going
+
+Train: lesson 4.9 Racing environment Level 2
+    n_envs: 20
+    steps: 12 * 400000
+    duration: 100min
+    changes: add 3rd gate panalty 0.2m earlier
+    result: 3rd gate finally normal, just like our mpcc trajectory. but first gate not stable
+    comments: I just realized sensor range is set to infinite， need more train?
+              With infinite sensor range only 5/10, 5.91s; with 0.5m sensor range only 2/10
+              should add hard velocity penalty box 0.5m before the gates
+              Additionally, is it a good idea to just apply mpcc cost as reward?
+
+Train: lesson 4.10 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 40min
+    changes: add vel penalty before each gate, -y_exceed
+    result: much slower, trajectory makes more sense, but adaptability still bad
+    comments: positive velocity reward in between gates, +k_crash
+
+Train: lesson 4.11 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: vel reward and penalty at different phases, add some crash penalty
+    result: trajectory looks beautiful, but neither stable nor fast
+    comments: 
+
+Train: lesson 4.12 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 6 * 400000
+    duration: 38min
+    changes: add gate reward, decrease success reward, loosen 2nd gate exceed penalty
+    result: stop between 2, 3 gates
+    comments: 3rd gate penalty too strong
+
+Train: lesson 4.13 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 3 * 400000
+    duration: 38min
+    changes: loosen 3nd gate exceed penalty
+    result: still a bit afraid of gate 3
+    comments: 
+
+Train: lesson 4.14 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 3 * 400000
+    duration: 24min
+    changes: loosen 3nd gate exceed penalty
+    result: low success rate, sometimes fail touching 3rd gate
+    comments: 
+
+Train: lesson 4.15 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 3 * 400000
+    duration: 24min
+    changes: penalize vel for 1,2,4gate, preserve exceeding penalty
+    result: better? 46% 6.39s
+    comments: 
+
+Train: lesson 4.16 Racing environment Level 0
+    n_envs: 20
+    steps: 20 * 500000
+    duration: 142min
+    changes: 10M steps in level 0 (Apparently I was too sleepy.)
+    result: avg 2.99s in level 0
+    comments: Ok, now we see the boundry of level 0  >_<!
+
+Train: lesson 4.17 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 5M
+    duration: 70min
+    changes: 5M steps in level 2
+    result: 48% 4.98s
+    comments: need more stability
+
+Train: lesson 4.18 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 5M
+    duration: 70min
+    changes: 5M steps in level 2
+    result: 47% 4.51s
+    comments: need more stability
+
+Train: lesson 4.19 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 5M
+    duration: 70min
+    changes: add finish reward, decrease success reward
+    result: 41% 4.41s
+    comments: not stable
+
+Train: lesson 4.20 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 20min
+    changes: +k_crash
+    result: 48% 4.59s 
+    comments: emphasize obstacles more
+
+Train: lesson 4.21 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 30min
+    changes: +k_obst
+    result: 47% 4.58s
+    comments: always fail at 1st gate, 4th gate.
+
+Train: lesson 4.22 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 30min
+    changes: +k_obst +k_vel at 1,4 gates, -k_gate
+    result: 49% 4.47s
+    comments: same as before
+
+Train: lesson 4.23 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 30min
+    changes: +k_obst +k_vel at 1,4 gates, -k_gate
+    result: 44% 4.48s not so good
+    comments: same as before
+
+Train: lesson 4.24 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 30min
+    changes: increase penalty, reset to 4.20
+    result: faster, even lower success rate
+    comments: 
+
+Train: lesson 4.25 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 20M
+    duration: 7h48min
+    changes: increase penalty, add success reward based on position through gates, encouraging center pass
+    result: 57% 5.12s
+    comments: show conservative behaviour at 2nd gate, but still rushing too fast at 4th gate
+
+Train: lesson 4.26 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 38min
+    changes: increase velocity penalty
+    result: 34% 4.56s
+    comments:
+
+Train: lesson 4.27 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 38min
+    changes: increase velocity penalty, obstacles penalty
+    result: still rushing towards gate 4
+    comments:
+
+Train: lesson 4.27 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 38min
+    changes: increase velocity penalty, obstacles penalty
+    result: 51% 4.96, still rushing towards gate 4
+    comments:
+
+Train: lesson 4.28 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 4M
+    duration: 80min
+    changes: increase velocity penalty for gate 4, remove finish reward, reset to 4.25
+    result: 63% 5.89s: more stable at gate1, mostly fail at gate4. but slower
+    comments:
+
+Train: lesson 4.29 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 40min
+    changes: increase velocity penalty for gate 4, +k_gate (for taking off), -k_obst， reset to 4.25
+    result: 59% 4.89s
+    comments: looks nice
+
+Train: lesson 4.30 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 40min
+    changes: keep training
+    result: 65% 4.91s
+    comments: not bad
+
+Train: lesson 4.31 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 10M
+    duration: 3h
+    changes: keep training over night
+    result: 48% 4.98s worse
+    comments: 
+
+Train: lesson 4.31 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 40min
+    changes: special reward for out gate3, reset to 4.30
+    result: 
+    comments: 
+
+Train: lesson 4.32 33 34 Racing environment Level 2 (0.5m sensor range)
+    n_envs: 20
+    steps: 2M
+    duration: 40min
+    changes: special reward for out gate3, larger k_gate, penalize taking off vertical velocity
+    result: 60% 4.72 4.33; 52% 4.83s 4.34
+    comments: 
+
+
+
+
