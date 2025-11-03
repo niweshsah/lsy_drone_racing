@@ -22,7 +22,7 @@ if Version(gymnasium.__version__) >= Version("1.1"):
 
 
 class DroneRaceEnv(RaceCoreEnv, Env):
-    """Single-agent drone racing environment."""
+    """Single-agent drone racing environment.."""
 
     def __init__(
         self,
