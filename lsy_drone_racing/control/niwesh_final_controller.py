@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -34,9 +33,9 @@ class MyController(Controller):
     LOG_INTERVAL = 100  # Print debug info every N ticks
 
     def __init__(
-        self, 
-        obs: dict[str, NDArray[np.floating]], 
-        info: dict, 
+        self,
+        obs: dict[str, NDArray[np.floating]],
+        info: dict,
         config: dict
     ):
         """Initialize the controller.
@@ -78,17 +77,13 @@ class MyController(Controller):
             approach_distance=0.5,
             num_intermediate_points=5
         )
-        print(f"Initial waypoints count: {len(waypoints)}")
-        print(f"Initial waypoints:\n{waypoints}")
         
         # Apply collision avoidance
         time_params, waypoints = self._avoid_collisions(
-            waypoints, 
+            waypoints,
             self.obstacle_positions,
             self.OBSTACLE_SAFETY_DISTANCE
         )
-        print(f"Replanned waypoints count: {len(waypoints)}")
-        print(f"Replanned waypoints:\n{waypoints}")
         
         # Generate smooth trajectory
         self.trajectory = self._generate_trajectory(self.TRAJECTORY_DURATION, waypoints)
@@ -105,11 +100,7 @@ class MyController(Controller):
                 waypoints=waypoints,
                 drone_position=obs['pos']
             )
-                # 在 __init__ 中添加调试代码
-        print("=== Available info keys ===")
-        print(info.keys())
-        print("\n=== Available obs keysduide ===")
-        print(obs.keys())
+            # 在 __init__ 中添加调试代码
 
 
     def _extract_gate_normals(self, gates_quaternions: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -166,8 +157,8 @@ class MyController(Controller):
         return waypoints
 
     def _generate_trajectory(
-        self, 
-        duration: float, 
+        self,
+        duration: float,
         waypoints: NDArray[np.floating]
     ) -> CubicSpline:
         """Generate a cubic spline trajectory through waypoints.
@@ -216,8 +207,8 @@ class MyController(Controller):
         trajectory = self._generate_trajectory(self.TRAJECTORY_DURATION, waypoints)
         
         # Sample trajectory at high resolution
-        time_samples = np.linspace(0, self.TRAJECTORY_DURATION, 
-                                   int(self._control_frequency * self.TRAJECTORY_DURATION))
+        time_samples = np.linspace(0, self.TRAJECTORY_DURATION,
+                                  int(self._control_frequency * self.TRAJECTORY_DURATION))
         trajectory_points = trajectory(time_samples)
         
         # Process each obstacle
@@ -305,30 +296,30 @@ class MyController(Controller):
         # Plot waypoints
         if waypoints is not None:
             self.ax.plot(waypoints[:, 0], waypoints[:, 1], waypoints[:, 2],
-                        marker='.', linestyle='--', color='blue', 
-                        label='Waypoints', linewidth=1)
+                         marker='.', linestyle='--', color='blue',
+                         label='Waypoints', linewidth=1)
         
         # Plot smooth trajectory
         if trajectory is not None:
             t_samples = np.linspace(0, self.TRAJECTORY_DURATION, self.VISUALIZATION_SAMPLES)
             traj_points = trajectory(t_samples)
             self.ax.plot(traj_points[:, 0], traj_points[:, 1], traj_points[:, 2],
-                        marker='x', linestyle='-', color='orange',
-                        label='Trajectory', markersize=3, linewidth=2)
+                         marker='x', linestyle='-', color='orange',
+                         label='Trajectory', markersize=3, linewidth=2)
         
         # Plot gates with normal vectors
         for pos, normal in zip(gate_positions, gate_normals):
             self.ax.quiver(pos[0], pos[1], pos[2],
-                          normal[0], normal[1], normal[2],
-                          length=0.5, color='green', linewidth=1.5, arrow_length_ratio=0.3)
+                           normal[0], normal[1], normal[2],
+                           length=0.5, color='green', linewidth=1.5, arrow_length_ratio=0.3)
         
         # Plot obstacles as vertical cylinders
         if obstacle_positions is not None:
             for obs_pos in obstacle_positions:
-                self.ax.plot([obs_pos[0], obs_pos[0]], 
-                           [obs_pos[1], obs_pos[1]], 
-                           [0, 1.4],
-                           color='grey', linewidth=5, alpha=0.6)
+                self.ax.plot([obs_pos[0], obs_pos[0]],
+                             [obs_pos[1], obs_pos[1]],
+                             [0, 1.4],
+                             color='grey', linewidth=5, alpha=0.6)
         
         # Plot drone current position
         if drone_position is not None:
@@ -386,7 +377,6 @@ class MyController(Controller):
             obs: Current observation with updated gate/obstacle positions.
             current_time: Current time in trajectory for logging.
         """
-        print(f"\n[REPLANNING] Time: {current_time:.2f}s")
         
         # Update gate information
         self.gate_normals = self._extract_gate_normals(obs['gates_quat'])
@@ -400,7 +390,6 @@ class MyController(Controller):
             approach_distance=0.5,
             num_intermediate_points=5
         )
-        print(f"New waypoints count: {len(waypoints)}")
         
         # Apply collision avoidance
         _, waypoints = self._avoid_collisions(
@@ -408,7 +397,7 @@ class MyController(Controller):
             obs['obstacles_pos'],
             self.OBSTACLE_SAFETY_DISTANCE
         )
-        # self._time_step = 0    
+        # self._time_step = 0   
         # Generate new trajectory
         self.trajectory = self._generate_trajectory(self.TRAJECTORY_DURATION, waypoints)
         
@@ -445,8 +434,7 @@ class MyController(Controller):
         
         # Periodic logging
         if self._time_step % self.LOG_INTERVAL == 0:
-            print(f"Time: {current_time:.2f}s | "
-                  f"Target: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
+            pass
         
         # Check for environment changes and replan if necessary
         if self._detect_environment_change(obs):
@@ -465,8 +453,8 @@ class MyController(Controller):
         
         # Draw trajectory in simulation environment (if available)
         try:
-            draw_line(self.env, self.trajectory(self.trajectory.x), 
-                     rgba=np.array([1.0, 1.0, 1.0, 0.2]))
+            draw_line(self.env, self.trajectory(self.trajectory.x),
+                      rgba=np.array([1.0, 1.0, 1.0, 0.2]))
         except (AttributeError, TypeError):
             pass  # env not available or draw_line not supported
         
@@ -515,7 +503,7 @@ class MyController(Controller):
             Array of waypoints with shape (num_timesteps, 3).
         """
         time_samples = np.linspace(0, self.TRAJECTORY_DURATION,
-                                   int(self._control_frequency * self.TRAJECTORY_DURATION))
+                                  int(self._control_frequency * self.TRAJECTORY_DURATION))
         return self.trajectory(time_samples)
 
     def set_time_step(self, time_step: int) -> None:
