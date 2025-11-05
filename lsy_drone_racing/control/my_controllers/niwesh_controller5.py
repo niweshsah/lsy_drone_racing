@@ -1,12 +1,13 @@
-"""
-A simple state controller that reactively plans a path to the next gate
+"""A simple state controller that reactively plans a path to the next gate
 based on the observation data.
 """
 
 from __future__ import annotations  # Python 3.10 type hints
+
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
@@ -14,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class StateController(Controller):
-    """
-    A simple state controller that flies directly to the next target gate
+    """A simple state controller that flies directly to the next target gate
     provided in the observation dictionary.
     """
 
@@ -43,13 +43,13 @@ class StateController(Controller):
             The drone's desired state [x, y, z, vx, vy, vz, ax, ay, az, yaw, rrate, prate, yrate].
         """
         # 1. Get the index of the gate we need to fly to
-        target_gate_idx = obs['target_gate']
+        target_gate_idx = obs["target_gate"]
 
         # 2. Get the 3D position [x, y, z] of that target gate
-        target_pos = obs['gates_pos'][target_gate_idx]
+        target_pos = obs["gates_pos"][target_gate_idx]
 
         # 3. (Optional but better) Calculate the desired yaw to face the target
-        current_pos = obs['pos']
+        current_pos = obs["pos"]
         delta_pos = target_pos - current_pos
         # Calculate yaw angle (rotation around Z-axis) to face the target
         desired_yaw = np.arctan2(delta_pos[1], delta_pos[0])
@@ -78,13 +78,12 @@ class StateController(Controller):
         truncated: bool,
         info: dict,
     ) -> bool:
-        """
-        Check if the episode is finished.
-        
+        """Check if the episode is finished.
+
         This controller is finished once all gates have been visited.
         """
         # Check the 'gates_visited' array in the observation
-        if np.all(obs['gates_visited']):
+        if np.all(obs["gates_visited"]):
             self._finished = True
 
         # The 'terminated' and 'truncated' flags signal if the environment

@@ -1,5 +1,4 @@
-"""
-A Proportional-Derivative (PD) feedback controller for state control.
+"""A Proportional-Derivative (PD) feedback controller for state control.
 
 This controller actively calculates a desired state (position, velocity, acceleration, yaw)
 to navigate the drone to the next target gate.
@@ -10,6 +9,7 @@ from __future__ import annotations  # Python 3.10 type hints
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
@@ -55,8 +55,7 @@ class StateController(Controller):
         q = obs["state"][6:10]  # Current attitude quaternion
         # Convert quaternion to yaw (Z-axis rotation)
         self.target_yaw = np.arctan2(
-            2.0 * (q[0] * q[3] + q[1] * q[2]),
-            1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]),
+            2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3])
         )
 
     def compute_control(
@@ -154,7 +153,7 @@ class StateController(Controller):
 
     def episode_callback(self):
         """Callback function called once after each episode.
-        
+
         A new controller is initialized for each episode, so no reset
         logic is needed here.
         """
@@ -162,7 +161,7 @@ class StateController(Controller):
 
     def episode_reset(self):
         """Reset the controller's internal state.
-        
+
         A new controller is initialized for each episode, so no reset
         logic is needed here.
         """

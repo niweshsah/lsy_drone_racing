@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import logging
 import os
+
 os.environ["SCIPY_ARRAY_API"] = "1"  # Must come first
 
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import fire
 import matplotlib.pyplot as plt
 import numpy as np
-import fire
-from scipy.spatial.transform import Rotation
 from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation
+
 from lsy_drone_racing.utils import load_config
 
 if TYPE_CHECKING:
@@ -35,14 +37,12 @@ def refine_path_with_obstacles(
     max_iterations: int = 10,
     dense_samples: int = 250,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Iteratively refine control points such that a spline passing through them
+    """Iteratively refine control points such that a spline passing through them
     avoids obstacles. Returns (final_smooth_path, final_control_points).
 
     control_points : (N,3) array of initial waypoints (before/through/after gates)
     obstacles      : (M,3) array of obstacle centers (x,y,z)
     """
-
     # Guard: if no obstacles, just return a single smooth path
     if obstacles.size == 0:
         t = np.linspace(0, 1, len(control_points))
@@ -81,9 +81,9 @@ def refine_path_with_obstacles(
                     v_xy = p[:2] - o[:2]
                     v_xy_norm = v_xy / (np.linalg.norm(v_xy) + 1e-8)
                     push_dist = avoidance_radius_pole + safety_margin
-                    p_new = np.array([o[0] + v_xy_norm[0] * push_dist,
-                                      o[1] + v_xy_norm[1] * push_dist,
-                                      p[2]])
+                    p_new = np.array(
+                        [o[0] + v_xy_norm[0] * push_dist, o[1] + v_xy_norm[1] * push_dist, p[2]]
+                    )
                     points_to_add.append((t_val, p_new))
                     collided = True
                     break
@@ -123,7 +123,9 @@ def refine_path_with_obstacles(
         current_t = np.array(new_t_list)[sort_idx]
         current_points = np.array(new_points_list)[sort_idx]
 
-        logger.debug(f"Iteration {iteration}: added {len(points_to_add)} points -> total control points {len(current_points)}")
+        logger.debug(
+            f"Iteration {iteration}: added {len(points_to_add)} points -> total control points {len(current_points)}"
+        )
 
     else:
         logger.warning("Refinement stopped: reached max iterations.")
@@ -140,11 +142,12 @@ def refine_path_with_obstacles(
 
 def draw_3d_lines(config: ConfigDict):
     """Draw gates, obstacles, vertical poles, and a smooth path passing through all gates."""
-
     gate_centers = [np.array(g["pos"]) for g in config.env.track.gates]
     gate_rpys = [np.array(g["rpy"]) for g in config.env.track.gates]
     obstacles_list = getattr(config.env.track, "obstacles", [])
-    obstacles = np.array([obs["pos"] for obs in obstacles_list]) if obstacles_list else np.empty((0, 3))
+    obstacles = (
+        np.array([obs["pos"] for obs in obstacles_list]) if obstacles_list else np.empty((0, 3))
+    )
 
     fig = plt.figure(figsize=(10, 7))
     ax = fig.add_subplot(111, projection="3d")
@@ -152,31 +155,54 @@ def draw_3d_lines(config: ConfigDict):
     # --- Plot gates ---
     gate_size = float(getattr(config.env, "gate_size", 1.0))
     half_size = gate_size / 2.0
-    local_verts = np.array([
-        [0, -half_size, -half_size],
-        [0,  half_size, -half_size],
-        [0,  half_size,  half_size],
-        [0, -half_size,  half_size],
-        [0, -half_size, -half_size],
-    ])
+    local_verts = np.array(
+        [
+            [0, -half_size, -half_size],
+            [0, half_size, -half_size],
+            [0, half_size, half_size],
+            [0, -half_size, half_size],
+            [0, -half_size, -half_size],
+        ]
+    )
 
     for i, (pos, rpy) in enumerate(zip(gate_centers, gate_rpys)):
         r = Rotation.from_euler("xyz", rpy)
         world_verts = r.apply(local_verts) + pos
-        ax.plot(world_verts[:, 0], world_verts[:, 1], world_verts[:, 2],
-                c="green", label="Gates" if i == 0 else None)
-        ax.scatter(pos[0], pos[1], pos[2], c="cyan", s=30, alpha=0.9,
-                   label="Gate Centers" if i == 0 else None)
+        ax.plot(
+            world_verts[:, 0],
+            world_verts[:, 1],
+            world_verts[:, 2],
+            c="green",
+            label="Gates" if i == 0 else None,
+        )
+        ax.scatter(
+            pos[0],
+            pos[1],
+            pos[2],
+            c="cyan",
+            s=30,
+            alpha=0.9,
+            label="Gate Centers" if i == 0 else None,
+        )
 
     # --- Plot obstacles and poles ---
     if obstacles.shape[0] > 0:
-        ax.scatter(obstacles[:, 0], obstacles[:, 1], obstacles[:, 2],
-                   c="red", s=50, label="Obstacles")
+        ax.scatter(
+            obstacles[:, 0], obstacles[:, 1], obstacles[:, 2], c="red", s=50, label="Obstacles"
+        )
         for obs in obstacles:
             x, y, z = obs
             # vertical pole from ground to obstacle z
-            ax.plot([x, x], [y, y], [0, z], c="brown", linewidth=2,
-                    label="Obstacle Pole" if "Obstacle Pole" not in [l.get_label() for l in ax.lines] else None)
+            ax.plot(
+                [x, x],
+                [y, y],
+                [0, z],
+                c="brown",
+                linewidth=2,
+                label="Obstacle Pole"
+                if "Obstacle Pole" not in [l.get_label() for l in ax.lines]
+                else None,
+            )
 
     # --- Build initial control points (before, center, after each gate) ---
     straight_half_length = 0.6
@@ -192,10 +218,23 @@ def draw_3d_lines(config: ConfigDict):
     smooth_path, refined_control_points = refine_path_with_obstacles(control_points, obstacles)
 
     # --- Plot final path and refined control points ---
-    ax.plot(smooth_path[:, 0], smooth_path[:, 1], smooth_path[:, 2],
-            c="blue", linewidth=2.5, label="Refined Path")
-    ax.scatter(refined_control_points[:, 0], refined_control_points[:, 1], refined_control_points[:, 2],
-               c="purple", s=10, alpha=0.6, label="Refined Control Points")
+    ax.plot(
+        smooth_path[:, 0],
+        smooth_path[:, 1],
+        smooth_path[:, 2],
+        c="blue",
+        linewidth=2.5,
+        label="Refined Path",
+    )
+    ax.scatter(
+        refined_control_points[:, 0],
+        refined_control_points[:, 1],
+        refined_control_points[:, 2],
+        c="purple",
+        s=10,
+        alpha=0.6,
+        label="Refined Control Points",
+    )
 
     # --- Labels and title ---
     ax.set_xlabel("X")
@@ -205,7 +244,11 @@ def draw_3d_lines(config: ConfigDict):
     ax.legend()
 
     # --- Enforce equal-like aspect by setting axis limits based on data range ---
-    all_pts = np.vstack((smooth_path, refined_control_points)) if refined_control_points.size else smooth_path
+    all_pts = (
+        np.vstack((smooth_path, refined_control_points))
+        if refined_control_points.size
+        else smooth_path
+    )
     x_min, x_max = np.min(all_pts[:, 0]), np.max(all_pts[:, 0])
     y_min, y_max = np.min(all_pts[:, 1]), np.max(all_pts[:, 1])
     z_min, z_max = np.min(all_pts[:, 2]), np.max(all_pts[:, 2])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation
@@ -13,23 +14,20 @@ if TYPE_CHECKING:
 
 
 class SmartPathController(Controller):
-    """
-    SmartPathController: 
-    A drone controller that generates smooth, collision-free trajectories 
+    """SmartPathController:
+    A drone controller that generates smooth, collision-free trajectories
     through a sequence of gates while dynamically adapting to environmental changes.
     """
 
     # --- Controller constants ---
     TRAJECTORY_DURATION = 25.0  # seconds
-    STATE_DIM = 13              # total drone state dimension
-    OBSTACLE_BUFFER = 0.3       # safety margin around obstacles (in meters)
-    TRAJECTORY_SAMPLES = 100    # number of samples for visualization
-    LOG_INTERVAL = 100          # step interval for logging/debug
+    STATE_DIM = 13  # total drone state dimension
+    OBSTACLE_BUFFER = 0.3  # safety margin around obstacles (in meters)
+    TRAJECTORY_SAMPLES = 100  # number of samples for visualization
+    LOG_INTERVAL = 100  # step interval for logging/debug
 
     def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
-        """
-        Initialize the controller with environment observations, configuration, and state.
-        """
+        """Initialize the controller with environment observations, configuration, and state."""
         super().__init__(obs, info, config)
 
         # Simulation parameters
@@ -42,10 +40,10 @@ class SmartPathController(Controller):
         self._prev_obstacle_flags = None
 
         # Extract environment data
-        self.gate_positions = obs['gates_pos']
-        self.gate_normals = self._compute_gate_normals(obs['gates_quat'])
-        self.obstacle_positions = obs['obstacles_pos']
-        self.start_position = obs['pos']
+        self.gate_positions = obs["gates_pos"]
+        self.gate_normals = self._compute_gate_normals(obs["gates_quat"])
+        self.obstacle_positions = obs["obstacles_pos"]
+        self.start_position = obs["pos"]
 
         # Generate base waypoints from gates
         waypoints = self._create_gate_waypoints(
@@ -53,20 +51,19 @@ class SmartPathController(Controller):
             gate_positions=self.gate_positions,
             gate_normals=self.gate_normals,
             approach_offset=0.5,
-            interp_points=5
+            interp_points=5,
         )
 
         # Apply obstacle avoidance correction
         _, collision_free_points = self._adjust_for_obstacles(
             waypoints=waypoints,
             obstacles=self.obstacle_positions,
-            safety_radius=self.OBSTACLE_BUFFER
+            safety_radius=self.OBSTACLE_BUFFER,
         )
 
         # Create a smooth trajectory spline
         self.trajectory = self._build_cubic_trajectory(
-            total_time=self.TRAJECTORY_DURATION,
-            waypoints=collision_free_points
+            total_time=self.TRAJECTORY_DURATION, waypoints=collision_free_points
         )
 
     # -------------------------------------------------------------------------
@@ -74,9 +71,7 @@ class SmartPathController(Controller):
     # -------------------------------------------------------------------------
 
     def _compute_gate_normals(self, gate_quaternions: NDArray[np.floating]) -> NDArray[np.floating]:
-        """
-        Convert gate orientations (quaternions) to forward-facing normal vectors.
-        """
+        """Convert gate orientations (quaternions) to forward-facing normal vectors."""
         rotations = Rotation.from_quat(gate_quaternions)
         return rotations.as_matrix()[:, :, 0]  # Extract the X-axis direction
 
@@ -86,11 +81,9 @@ class SmartPathController(Controller):
         gate_positions: NDArray[np.floating],
         gate_normals: NDArray[np.floating],
         approach_offset: float = 0.5,
-        interp_points: int = 5
+        interp_points: int = 5,
     ) -> NDArray[np.floating]:
-        """
-        Generate a series of intermediate waypoints through each gate to ensure smooth transitions.
-        """
+        """Generate a series of intermediate waypoints through each gate to ensure smooth transitions."""
         num_gates = gate_positions.shape[0]
         interpolated_points = []
 
@@ -106,12 +99,9 @@ class SmartPathController(Controller):
         return waypoints
 
     def _build_cubic_trajectory(
-        self,
-        total_time: float,
-        waypoints: NDArray[np.floating]
+        self, total_time: float, waypoints: NDArray[np.floating]
     ) -> CubicSpline:
-        """
-        Fit a cubic spline trajectory through the provided waypoints, 
+        """Fit a cubic spline trajectory through the provided waypoints,
         parametrized by arc length mapped to total flight time.
         """
         segment_vectors = np.diff(waypoints, axis=0)
@@ -122,17 +112,15 @@ class SmartPathController(Controller):
         return CubicSpline(time_params, waypoints)
 
     def _adjust_for_obstacles(
-        self,
-        waypoints: NDArray[np.floating],
-        obstacles: NDArray[np.floating],
-        safety_radius: float
+        self, waypoints: NDArray[np.floating], obstacles: NDArray[np.floating], safety_radius: float
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Adjust trajectory waypoints to maintain a safe distance from obstacles 
+        """Adjust trajectory waypoints to maintain a safe distance from obstacles
         by introducing detours if necessary.
         """
         trajectory = self._build_cubic_trajectory(self.TRAJECTORY_DURATION, waypoints)
-        time_samples = np.linspace(0, self.TRAJECTORY_DURATION, int(self._control_freq * self.TRAJECTORY_DURATION))
+        time_samples = np.linspace(
+            0, self.TRAJECTORY_DURATION, int(self._control_freq * self.TRAJECTORY_DURATION)
+        )
         points = trajectory(time_samples)
 
         # For each obstacle, check if any path points violate safety distance
@@ -180,16 +168,14 @@ class SmartPathController(Controller):
     # -------------------------------------------------------------------------
 
     def _environment_changed(self, obs: dict[str, NDArray[np.bool_]]) -> bool:
-        """
-        Detect changes in gate or obstacle visitation status.
-        """
+        """Detect changes in gate or obstacle visitation status."""
         if self._prev_gate_flags is None:
-            self._prev_gate_flags = np.array(obs['gates_visited'], dtype=bool)
-            self._prev_obstacle_flags = np.array(obs['obstacles_visited'], dtype=bool)
+            self._prev_gate_flags = np.array(obs["gates_visited"], dtype=bool)
+            self._prev_obstacle_flags = np.array(obs["obstacles_visited"], dtype=bool)
             return False
 
-        gate_flags = np.array(obs['gates_visited'], dtype=bool)
-        obstacle_flags = np.array(obs['obstacles_visited'], dtype=bool)
+        gate_flags = np.array(obs["gates_visited"], dtype=bool)
+        obstacle_flags = np.array(obs["obstacles_visited"], dtype=bool)
 
         new_gate = np.any((~self._prev_gate_flags) & gate_flags)
         new_obstacle = np.any((~self._prev_obstacle_flags) & obstacle_flags)
@@ -200,24 +186,22 @@ class SmartPathController(Controller):
         return new_gate or new_obstacle
 
     def _update_trajectory(self, obs: dict[str, NDArray[np.floating]], current_time: float) -> None:
-        """
-        Replan trajectory dynamically if the environment has changed.
-        """
-        self.gate_normals = self._compute_gate_normals(obs['gates_quat'])
-        self.gate_positions = obs['gates_pos']
+        """Replan trajectory dynamically if the environment has changed."""
+        self.gate_normals = self._compute_gate_normals(obs["gates_quat"])
+        self.gate_positions = obs["gates_pos"]
 
         new_waypoints = self._create_gate_waypoints(
             start_pos=self.start_position,
             gate_positions=self.gate_positions,
             gate_normals=self.gate_normals,
             approach_offset=0.5,
-            interp_points=5
+            interp_points=5,
         )
 
         _, safe_points = self._adjust_for_obstacles(
             waypoints=new_waypoints,
-            obstacles=obs['obstacles_pos'],
-            safety_radius=self.OBSTACLE_BUFFER
+            obstacles=obs["obstacles_pos"],
+            safety_radius=self.OBSTACLE_BUFFER,
         )
 
         self.trajectory = self._build_cubic_trajectory(self.TRAJECTORY_DURATION, safe_points)
@@ -226,10 +210,10 @@ class SmartPathController(Controller):
     # --- Core Control Logic ---
     # -------------------------------------------------------------------------
 
-    def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None) -> NDArray[np.floating]:
-        """
-        Compute the target state for the drone at the current simulation time step.
-        """
+    def compute_control(
+        self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
+    ) -> NDArray[np.floating]:
+        """Compute the target state for the drone at the current simulation time step."""
         current_time = min(self._time_step / self._control_freq, self.TRAJECTORY_DURATION)
         target_pos = self.trajectory(current_time)
 
@@ -247,7 +231,9 @@ class SmartPathController(Controller):
 
         # Visualization
         try:
-            draw_line(self.env, self.trajectory(self.trajectory.x), rgba=np.array([1.0, 1.0, 1.0, 0.2]))
+            draw_line(
+                self.env, self.trajectory(self.trajectory.x), rgba=np.array([1.0, 1.0, 1.0, 0.2])
+            )
         except (AttributeError, TypeError):
             pass
 
@@ -261,11 +247,9 @@ class SmartPathController(Controller):
         reward: float,
         terminated: bool,
         truncated: bool,
-        info: dict
+        info: dict,
     ) -> bool:
-        """
-        Called after each environment step; updates time and checks completion.
-        """
+        """Called after each environment step; updates time and checks completion."""
         self._time_step += 1
         return self._finished
 
@@ -279,7 +263,9 @@ class SmartPathController(Controller):
 
     def get_trajectory_points(self) -> NDArray[np.floating]:
         """Return sampled trajectory waypoints."""
-        times = np.linspace(0, self.TRAJECTORY_DURATION, int(self._control_freq * self.TRAJECTORY_DURATION))
+        times = np.linspace(
+            0, self.TRAJECTORY_DURATION, int(self._control_freq * self.TRAJECTORY_DURATION)
+        )
         return self.trajectory(times)
 
     def set_time_step(self, t: int) -> None:

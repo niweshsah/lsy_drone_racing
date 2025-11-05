@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation
@@ -13,11 +14,10 @@ if TYPE_CHECKING:
 
 
 class SmartPathController(Controller):
-    """
-    SmartPathController
+    """SmartPathController
     -------------------
     An adaptive drone controller that generates a continuous, smooth trajectory
-    through gates while actively avoiding obstacles and dynamically updating 
+    through gates while actively avoiding obstacles and dynamically updating
     its plan when the environment changes.
     """
 
@@ -52,21 +52,16 @@ class SmartPathController(Controller):
             gates=self._gates,
             normals=self._gate_normals,
             offset=0.5,
-            segments=5
+            segments=5,
         )
 
         # Collision-aware refinement
         _, safe_path = self._apply_obstacle_clearance(
-            path=raw_path,
-            obstacles=self._obstacles,
-            margin=self.AVOID_RADIUS
+            path=raw_path, obstacles=self._obstacles, margin=self.AVOID_RADIUS
         )
 
         # Smooth cubic spline trajectory
-        self._traj = self._fit_cubic_path(
-            duration=self.MAX_FLIGHT_TIME,
-            points=safe_path
-        )
+        self._traj = self._fit_cubic_path(duration=self.MAX_FLIGHT_TIME, points=safe_path)
 
     # =========================================================================
     # === Trajectory Construction Utilities ==================================
@@ -83,10 +78,9 @@ class SmartPathController(Controller):
         gates: NDArray[np.floating],
         normals: NDArray[np.floating],
         offset: float = 0.5,
-        segments: int = 5
+        segments: int = 5,
     ) -> NDArray[np.floating]:
-        """
-        Create smooth intermediate waypoints through the gates 
+        """Create smooth intermediate waypoints through the gates
         with slight forward/backward offsets to guide the spline.
         """
         steps = np.linspace(-offset, offset, segments)
@@ -96,14 +90,8 @@ class SmartPathController(Controller):
         path = path.reshape(gates.shape[0], segments, 3).reshape(-1, 3)
         return np.vstack([start, path])
 
-    def _fit_cubic_path(
-        self,
-        duration: float,
-        points: NDArray[np.floating]
-    ) -> CubicSpline:
-        """
-        Fit a cubic spline along waypoints using cumulative distance as time parameter.
-        """
+    def _fit_cubic_path(self, duration: float, points: NDArray[np.floating]) -> CubicSpline:
+        """Fit a cubic spline along waypoints using cumulative distance as time parameter."""
         diffs = np.diff(points, axis=0)
         distances = np.linalg.norm(diffs, axis=1)
         arc_length = np.concatenate([[0], np.cumsum(distances)])
@@ -111,14 +99,9 @@ class SmartPathController(Controller):
         return CubicSpline(t_values, points)
 
     def _apply_obstacle_clearance(
-        self,
-        path: NDArray[np.floating],
-        obstacles: NDArray[np.floating],
-        margin: float
+        self, path: NDArray[np.floating], obstacles: NDArray[np.floating], margin: float
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Re-route the path slightly to maintain safe distance from each obstacle.
-        """
+        """Re-route the path slightly to maintain safe distance from each obstacle."""
         spline = self._fit_cubic_path(self.MAX_FLIGHT_TIME, path)
         times = np.linspace(0, self.MAX_FLIGHT_TIME, int(self._freq * self.MAX_FLIGHT_TIME))
         trajectory_points = spline(times)
@@ -188,15 +171,11 @@ class SmartPathController(Controller):
         self._gate_normals = self._extract_gate_normals(obs["gates_quat"])
 
         new_path = self._generate_gate_path(
-            start=self._drone_start,
-            gates=self._gates,
-            normals=self._gate_normals
+            start=self._drone_start, gates=self._gates, normals=self._gate_normals
         )
 
         _, updated_points = self._apply_obstacle_clearance(
-            path=new_path,
-            obstacles=self._obstacles,
-            margin=self.AVOID_RADIUS
+            path=new_path, obstacles=self._obstacles, margin=self.AVOID_RADIUS
         )
 
         self._traj = self._fit_cubic_path(self.MAX_FLIGHT_TIME, updated_points)
@@ -206,13 +185,9 @@ class SmartPathController(Controller):
     # =========================================================================
 
     def compute_control(
-        self,
-        obs: dict[str, NDArray[np.floating]],
-        info: dict | None = None
+        self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
-        """
-        Compute desired target position for current timestep based on spline.
-        """
+        """Compute desired target position for current timestep based on spline."""
         t_now = min(self._step / self._freq, self.MAX_FLIGHT_TIME)
         target_position = self._traj(t_now)
 
@@ -240,7 +215,7 @@ class SmartPathController(Controller):
         reward: float,
         terminated: bool,
         truncated: bool,
-        info: dict
+        info: dict,
     ) -> bool:
         """Called each step; updates timestep and returns True if mission done."""
         self._step += 1

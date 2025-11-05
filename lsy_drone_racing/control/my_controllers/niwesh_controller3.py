@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
+
 import numpy as np
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
@@ -55,9 +58,6 @@ if TYPE_CHECKING:
 #         self._finished = False
 
 
-
-
-
 class SafeGateFollower(Controller):
     """Safe gate follower with height offset to avoid top collisions."""
 
@@ -65,14 +65,16 @@ class SafeGateFollower(Controller):
         super().__init__(obs, info, config)
         self._tick = 0
         self._finished = False
-        self._gates = obs['gates_pos']
+        self._gates = obs["gates_pos"]
         self._target_idx = 0
         self._kp = 1.0
         self._max_vel = 0.3
         self._safe_height_offset = -0.1  # 10 cm below gate center
 
-    def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None) -> NDArray[np.floating]:
-        pos = obs['pos']
+    def compute_control(
+        self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
+    ) -> NDArray[np.floating]:
+        pos = obs["pos"]
         target_pos = self._gates[self._target_idx].copy()
         target_pos[2] += self._safe_height_offset  # apply height safety offset
 
@@ -88,11 +90,20 @@ class SafeGateFollower(Controller):
                 self._finished = True
                 self._target_idx = len(self._gates) - 1
 
-        action = np.concatenate([pos, vel_cmd, acc_cmd, [yaw, rrate, prate, yrate]], dtype=np.float32)
+        action = np.concatenate(
+            [pos, vel_cmd, acc_cmd, [yaw, rrate, prate, yrate]], dtype=np.float32
+        )
         return action
 
-    def step_callback(self, action: NDArray[np.floating], obs: dict, reward: float,
-                      terminated: bool, truncated: bool, info: dict) -> bool:
+    def step_callback(
+        self,
+        action: NDArray[np.floating],
+        obs: dict,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: dict,
+    ) -> bool:
         self._tick += 1
         return self._finished
 
@@ -100,6 +111,3 @@ class SafeGateFollower(Controller):
         self._tick = 0
         self._target_idx = 0
         self._finished = False
-
-
-

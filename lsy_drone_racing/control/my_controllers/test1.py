@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import os
+
 os.environ["SCIPY_ARRAY_API"] = "1"  # Ensure SciPy API is set first
 
 from typing import TYPE_CHECKING
+
 import numpy as np
 from scipy.interpolate import CubicSpline
+
 from lsy_drone_racing.control import Controller
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
     from ml_collections import ConfigDict
+    from numpy.typing import NDArray
+
 
 class GateTrajectoryController(Controller):
     """Controller to follow gates using a cubic spline trajectory."""
@@ -26,7 +30,7 @@ class GateTrajectoryController(Controller):
         self._start_phase_ticks = 50  # ticks to smoothly reach first gate
 
         # Extract gate positions from config
-        self._waypoints = np.array([gate['pos'] for gate in config.env.track.gates])
+        self._waypoints = np.array([gate["pos"] for gate in config.env.track.gates])
         if len(self._waypoints) < 2:
             raise ValueError("Need at least 2 gates to define a trajectory!")
 
@@ -49,7 +53,6 @@ class GateTrajectoryController(Controller):
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
         """Compute next desired drone state and log position."""
-
         # --- MODIFIED ---
         # On the very first tick of an episode, record the drone's starting position
         if self._initial_pos is None:
@@ -99,7 +102,7 @@ class GateTrajectoryController(Controller):
         self._tick = 0
         self._finished = False
         self.position_log.clear()  # reset logged positions
-        
+
         # --- MODIFIED ---
         # Reset initial_pos so it's re-captured on the next episode's first tick
         self._initial_pos = None

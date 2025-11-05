@@ -4,10 +4,10 @@ import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["SCIPY_ARRAY_API"] = "1"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
-os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/dev/null'
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/dev/null"
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
 
 import fire
@@ -15,10 +15,12 @@ import gymnasium
 import jax.numpy as jp
 import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
+
 from lsy_drone_racing.utils import load_config, load_controller  # <-- added load_controller
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
+
     from lsy_drone_racing.control.controller import Controller
     from lsy_drone_racing.envs.drone_race import DroneRaceEnv
 
@@ -33,7 +35,6 @@ def simulate(
     camera_view: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
 ) -> list[float]:
     """Run simulation with a specified controller via CLI."""
-
     # Load configuration
     config_path = Path(__file__).parents[1] / "config" / config
     config: ConfigDict = load_config(config_path)
@@ -90,9 +91,10 @@ def simulate(
             if terminated or truncated or controller_finished:
                 reason = (
                     getattr(controller, "_stop_reason", "Controller finished all waypoints")
-                    if controller_finished else
-                    "Environment terminated" if terminated else
-                    "Environment truncated"
+                    if controller_finished
+                    else "Environment terminated"
+                    if terminated
+                    else "Environment truncated"
                 )
                 print(f"[Episode {run_idx + 1}] Stopped at t={curr_time:.2f}s. Reason: {reason}")
                 break
