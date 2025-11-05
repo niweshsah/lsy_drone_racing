@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def main():
     """Run the simulation N times and save the results as 'submission.csv'."""
     n_runs = 20
-    config_file = "level2.toml"
+    config_file = "level0.toml"
     config = load_config(Path(__file__).parents[1] / "config" / config_file)
     assert config.sim.physics == "first_principles", (
         "Only first_principles physics is allowed for the challenge allowed!"

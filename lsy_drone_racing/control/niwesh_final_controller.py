@@ -1,29 +1,4 @@
-"""
-MyStateController
-Author: Yuming Li
-Date: 29.10.2025
 
-Description:
-  This controller uses cubic spline interpolation to generate smooth trajectories through waypoints.
-It supports dynamic replanning when gates or obstacles change position during flight.
-  This controller is a refactored and extended version of the EasyController 
-from the LSY Drone Racing project by Yufei Hua (Learning Systems and Robotics Lab, TUM).
-It is used solely for learning and research purposes.
-
-Key features:
-- Pre-computed trajectory with cubic spline interpolation
-- Collision avoidance with obstacles
-- Dynamic replanning on environment changes
-- Real-time 3D visualization
-
-Original repository:
-https://github.com/yufei4hua/lsy_drone_racing
-
-License:
-  This file is derived from code released under the MIT License.
-  Copyright (c) 2024 Learning Systems and Robotics Lab (LSY)
-  See the original license at the above repository for details.
-"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
