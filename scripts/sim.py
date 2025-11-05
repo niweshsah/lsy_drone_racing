@@ -6,29 +6,57 @@ Run as:
 
 Look for instructions in `README.md` and in the official documentation.
 """
-
 from __future__ import annotations
 
+
 import logging
+import os
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["SCIPY_ARRAY_API"] = "1"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/dev/null'
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
 
 import fire
 import gymnasium
 import jax.numpy as jp
 import numpy as np
 from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
-
-from lsy_drone_racing.utils import load_config, load_controller
+from lsy_drone_racing.utils import load_config, load_controller  # <-- added load_controller
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
-
     from lsy_drone_racing.control.controller import Controller
     from lsy_drone_racing.envs.drone_race import DroneRaceEnv
 
-
 logger = logging.getLogger(__name__)
+
+# from __future__ import annotations
+
+# import logging
+# from pathlib import Path
+# from typing import TYPE_CHECKING
+
+# import fire
+# import gymnasium
+# import jax.numpy as jp
+# import numpy as np
+# from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
+
+# from lsy_drone_racing.utils import load_config, load_controller
+
+# if TYPE_CHECKING:
+#     from ml_collections import ConfigDict
+
+#     from lsy_drone_racing.control.controller import Controller
+#     from lsy_drone_racing.envs.drone_race import DroneRaceEnv
+
+
+# logger = logging.getLogger(__name__)
 
 
 def simulate(
