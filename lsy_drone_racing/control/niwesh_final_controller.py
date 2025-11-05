@@ -64,7 +64,7 @@ class MyController(Controller):
         )
         
         self._debug_waypoints_initial = waypoints.copy()
-        
+        #
         waypoints = self._add_detour_waypoints(
             waypoints,
             self.gate_positions,
