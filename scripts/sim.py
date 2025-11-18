@@ -21,13 +21,16 @@ os.environ["JAX_PLATFORM_NAME"] = "cpu"
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/dev/null"
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="jax")
 
-import fire
-import gymnasium
-import jax.numpy as jp
-import numpy as np
-from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
+import fire  # noqa: E402
+import gymnasium  # noqa: E402
+import jax.numpy as jp  # noqa: E402
+import numpy as np  # noqa: E402
+from gymnasium.wrappers.jax_to_numpy import JaxToNumpy  # noqa: E402
 
-from lsy_drone_racing.utils import load_config, load_controller  # <-- added load_controller
+from lsy_drone_racing.utils import (  # <-- added load_controller  # noqa: E402
+    load_config,
+    load_controller,
+)
 
 if TYPE_CHECKING:
     from ml_collections import ConfigDict
@@ -37,32 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# from __future__ import annotations
-
-# import logging
-# from pathlib import Path
-# from typing import TYPE_CHECKING
-
-# import fire
-# import gymnasium
-# import jax.numpy as jp
-# import numpy as np
-# from gymnasium.wrappers.jax_to_numpy import JaxToNumpy
-
-# from lsy_drone_racing.utils import load_config, load_controller
-
-# if TYPE_CHECKING:
-#     from ml_collections import ConfigDict
-
-#     from lsy_drone_racing.control.controller import Controller
-#     from lsy_drone_racing.envs.drone_race import DroneRaceEnv
-
-
-# logger = logging.getLogger(__name__)
-
-
 def simulate(
-    config: str = "level2.toml",
+    config: str = "level3.toml",
     controller: str | None = None,
     n_runs: int = 1,
     render: bool | None = None,
@@ -159,3 +138,20 @@ if __name__ == "__main__":
     logging.getLogger("lsy_drone_racing").setLevel(logging.INFO)
     logger.setLevel(logging.INFO)
     fire.Fire(simulate, serialize=lambda _: None)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
