@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import numpy as np
 import scipy.linalg
+import casadi as cs
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation as R
 
@@ -26,11 +27,11 @@ if TYPE_CHECKING:
 
 
 # ==============================================================================
-# ACADOS MODEL & SOLVER GENERATION (From your MPC Code)
+# ACADOS MODEL & SOLVER GENERATION
 # ==============================================================================
 
 def create_acados_model(parameters: dict) -> AcadosModel:
-    """Creates an acados model from a symbolic drone_model."""
+    """Creates an acados model from a symbolic drone_model with obstacle constraints."""
     X_dot, X, U, _ = symbolic_dynamics_euler(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
@@ -49,6 +50,19 @@ def create_acados_model(parameters: dict) -> AcadosModel:
     model.f_impl_expr = None
     model.x = X
     model.u = U
+
+    # --- ADDED: Obstacle Avoidance Constraints ---
+    # Define parameters: [obs_x, obs_y, min_safe_dist_squared]
+    # We use a single 'closest obstacle' for the horizon to keep it fast
+    p = cs.SX.sym('p', 3) 
+    model.p = p
+
+    # Constraint Expression: distance_sq >= min_safe_dist_squared
+    # h(x) = (x - obs_x)^2 + (y - obs_y)^2 - min_safe_dist_squared >= 0
+    # We only care about XY distance (Cylindrical obstacle)
+    dist_sq = (X[0] - p[0])**2 + (X[1] - p[1])**2
+    model.con_h_expr = dist_sq - p[2]
+
     return model
 
 
@@ -105,7 +119,8 @@ def create_ocp_solver(
     ocp.cost.yref = np.zeros((ny,))
     ocp.cost.yref_e = np.zeros((ny_e,))
 
-    # Constraints
+    # --- Constraints ---
+    # 1. Box Constraints (State/Input)
     ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5]) # Max roll/pitch/yaw
     ocp.constraints.ubx = np.array([0.5, 0.5, 0.5])
     ocp.constraints.idxbx = np.array([3, 4, 5])
@@ -115,6 +130,27 @@ def create_ocp_solver(
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
     ocp.constraints.x0 = np.zeros((nx))
+
+    # 2. Nonlinear Constraints (Obstacle Avoidance)
+    # We constrained con_h_expr >= 0
+    # So lower bound is 0, upper bound is infinity (large number)
+    ocp.constraints.lh = np.array([0.0])
+    ocp.constraints.uh = np.array([1e9])
+    
+    # Slack variables for soft constraints (prevents solver crash if too close)
+    # Penalize violations of the obstacle constraint
+    ocp.constraints.lsh = np.zeros(1)
+    ocp.constraints.ush = np.zeros(1)
+    ocp.constraints.idxsh = np.array([0])
+    
+    # Weights for slack variables (High weight = behave like hard constraint)
+    ocp.cost.Zl = np.array([1000.0])
+    ocp.cost.Zu = np.array([1000.0])
+    ocp.cost.zl = np.array([1000.0])
+    ocp.cost.zu = np.array([1000.0])
+
+    # Initial parameter values (far away obstacle)
+    ocp.parameter_values = np.array([100.0, 100.0, 0.1])
 
     # Solver Options
     ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
@@ -145,17 +181,19 @@ def create_ocp_solver(
 
 class MPCSplineController(Controller):
     """
-    Controller that combines High-Level Spline Replanning (Obstacles/Gates)
-    with Low-Level MPC tracking.
+    Controller that combines High-Level Spline (GATES ONLY)
+    with Low-Level MPC tracking (OBSTACLE DEFLECTION).
     """
     
     # Planner Constants
     FLIGHT_DURATION = 25.0
     REPLAN_RADIUS = 0.5
-    OBSTACLE_CLEARANCE = 0.2
     
     # MPC Constants
     MPC_HORIZON_STEPS = 25  # N
+    OBSTACLE_RADIUS_REAL = 0.3 # Approximate radius of obstacle
+    DRONE_RADIUS = 0.15
+    SAFETY_MARGIN = 0.2
 
     def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict):
         super().__init__(initial_obs, info, sim_config)
@@ -167,7 +205,7 @@ class MPCSplineController(Controller):
         self.__plan_initial_trajectory(initial_obs)
 
         # ---------------------------------------------------------
-        # 2. Initialize MPC Solver (From AttitudeMPC)
+        # 2. Initialize MPC Solver
         # ---------------------------------------------------------
         self._dt = 1 / sim_config.env.freq
         self._T_HORIZON = self.MPC_HORIZON_STEPS * self._dt
@@ -188,7 +226,7 @@ class MPCSplineController(Controller):
         self._finished = False
 
     # --------------------------------------------------------------------------
-    # PLANNER LOGIC (Private methods from MyController)
+    # PLANNER LOGIC (Pure Gates)
     # --------------------------------------------------------------------------
 
     def __initialize_planner_state(self, initial_obs, sim_config):
@@ -209,24 +247,20 @@ class MPCSplineController(Controller):
         self.__trajectory_spline = None
 
     def __plan_initial_trajectory(self, initial_obs):
-        # 1. Gates
+        """Generates trajectory STRICTLY through gates."""
+        # 1. Generate waypoints (Center + Entry/Exit alignment points)
         path_points = self.__generate_gate_approach_points(
             self.__start_position,
             self.__gate_positions,
             self.__gate_normals
         )
-        # 2. Detours
-        path_points = self.__add_detour_logic(
-            path_points, self.__gate_positions, self.__gate_normals,
-            self.__gate_y_axes, self.__gate_z_axes
-        )
-        # 3. Obstacles
-        time_knots, path_points = self.__insert_obstacle_avoidance_points(
-            path_points, self.__obstacle_positions, self.OBSTACLE_CLEARANCE
-        )
-        # 4. Spline
+        
+        # REMOVED: __add_detour_logic
+        # REMOVED: __insert_obstacle_avoidance_points
+        
+        # 2. Generate Spline
         self.__trajectory_spline = self.__compute_trajectory_spline(
-            self.FLIGHT_DURATION, path_points, custom_time_knots=time_knots
+            self.FLIGHT_DURATION, path_points
         )
 
     def __extract_gate_frames(self, gates_quaternions):
@@ -256,214 +290,110 @@ class MPCSplineController(Controller):
         time_knots = cumulative_distance / cumulative_distance[-1] * total_time
         return CubicSpline(time_knots, path_points)
 
-    def __process_single_obstacle(self, obs_center, sampled_points, sampled_times, clearance):
-        collision_free_times = []
-        collision_free_points = []
-        is_inside = False
-        entry_idx = None
-        obs_xy = obs_center[:2]
-
-        for i, point in enumerate(sampled_points):
-            dist_xy = np.linalg.norm(obs_xy - point[:2])
-
-            if dist_xy < clearance:
-                if not is_inside:
-                    is_inside = True
-                    entry_idx = i
-            elif is_inside:
-                # Exiting zone
-                is_inside = False
-                exit_idx = i
-                
-                entry_pt = sampled_points[entry_idx]
-                exit_pt = sampled_points[exit_idx]
-                
-                # Bisector avoidance
-                entry_vec = entry_pt[:2] - obs_xy
-                exit_vec = exit_pt[:2] - obs_xy
-                avoid_vec = entry_vec + exit_vec
-                norm_v = np.linalg.norm(avoid_vec)
-                if norm_v > 0: avoid_vec /= norm_v
-                
-                new_pos_xy = obs_xy + avoid_vec * clearance
-                new_pos_z = (entry_pt[2] + exit_pt[2]) / 2
-                new_wp = np.concatenate([new_pos_xy, [new_pos_z]])
-                
-                avg_time = (sampled_times[entry_idx] + sampled_times[exit_idx]) / 2
-                collision_free_times.append(avg_time)
-                collision_free_points.append(new_wp)
-            else:
-                collision_free_times.append(sampled_times[i])
-                collision_free_points.append(point)
-        
-        return np.array(collision_free_times), np.array(collision_free_points)
-
-    def __insert_obstacle_avoidance_points(self, path_points, obstacle_centers, clearance):
-        temp_spline = self.__compute_trajectory_spline(self.FLIGHT_DURATION, path_points)
-        num_samples = int(self.__control_freq * self.FLIGHT_DURATION)
-        sampled_times = np.linspace(0, self.FLIGHT_DURATION, num_samples)
-        sampled_points = temp_spline(sampled_times)
-
-        for obs_center in obstacle_centers:
-            sampled_times, sampled_points = self.__process_single_obstacle(
-                obs_center, sampled_points, sampled_times, clearance
-            )
-        return sampled_times, sampled_points
-
     def __check_for_env_update(self, current_obs) -> bool:
-        """Trigger replan if gates/obstacles visited OR proximity danger."""
+        """Trigger replan if gates visited. Obstacle proximity is now handled by MPC, not Replanning."""
         # 1. State Transitions
         if self.__last_gate_flags is None:
             self.__last_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-            self.__last_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
+            # We don't track obstacles for replanning anymore, as spline ignores them
             return False
 
         current_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-        current_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
-        
         gate_newly_hit = np.any((~self.__last_gate_flags) & current_gate_flags)
-        obstacle_newly_hit = np.any((~self.__last_obstacle_flags) & current_obstacle_flags)
-
         self.__last_gate_flags = current_gate_flags
-        self.__last_obstacle_flags = current_obstacle_flags
-
-        # 2. Proximity (RWI)
-        drone_pos = current_obs["pos"]
         
-        # Gates (3D)
+        # 2. Proximity (RWI)
+        # Only check Gates for replanning logic (if gates move/update)
+        drone_pos = current_obs["pos"]
         gate_dists = np.linalg.norm(current_obs["gates_pos"] - drone_pos, axis=1)
         gate_alert = np.any(gate_dists < self.REPLAN_RADIUS)
         
-        # Obstacles (2D)
-        obs_dists = np.linalg.norm(current_obs["obstacles_pos"][:, :2] - drone_pos[:2], axis=1)
-        obs_alert = np.any(obs_dists < self.REPLAN_RADIUS)
-
-        return gate_newly_hit or obstacle_newly_hit or gate_alert or obs_alert
+        return gate_newly_hit or gate_alert
 
     def __regenerate_flight_plan(self, current_obs, elapsed_time):
-        """Replans trajectory based on new observations."""
+        """Replans trajectory (gates only) based on new observations."""
         self.__gate_positions = current_obs["gates_pos"]
-        self.__gate_normals, self.__gate_y_axes, self.__gate_z_axes = self.__extract_gate_frames(
+        self.__gate_normals, _, _ = self.__extract_gate_frames(
             current_obs["gates_quat"]
         )
 
         path_points = self.__generate_gate_approach_points(
             self.__start_position, self.__gate_positions, self.__gate_normals
         )
-        path_points = self.__add_detour_logic(
-            path_points, self.__gate_positions, self.__gate_normals,
-            self.__gate_y_axes, self.__gate_z_axes
-        )
-        time_knots, path_points = self.__insert_obstacle_avoidance_points(
-            path_points, current_obs["obstacles_pos"], self.OBSTACLE_CLEARANCE
-        )
+        # Direct spline generation without detour/avoidance
         self.__trajectory_spline = self.__compute_trajectory_spline(
-            self.FLIGHT_DURATION, path_points, custom_time_knots=time_knots
+            self.FLIGHT_DURATION, path_points
         )
-
-    def __determine_detour_direction(self, v_proj, v_proj_norm, y_axis, z_axis):
-        if v_proj_norm < 1e-6:
-            return y_axis, "right", 0.0
-        
-        v_proj_y = np.dot(v_proj, y_axis)
-        v_proj_z = np.dot(v_proj, z_axis)
-        angle_deg = np.arctan2(v_proj_z, v_proj_y) * 180 / np.pi
-
-        if -90 <= angle_deg < 45: return y_axis, "right", angle_deg
-        elif 45 <= angle_deg < 135: return z_axis, "top", angle_deg
-        else: return -y_axis, "left", angle_deg
-
-    def __add_detour_logic(self, path_points, g_pos, g_norm, g_y, g_z, num_pts=5, angle_deg=120.0, rad=0.65):
-        num_gates = g_pos.shape[0]
-        pts_list = list(path_points)
-        inserts = 0
-
-        for i in range(num_gates - 1):
-            last_idx = 1 + (i + 1) * num_pts - 1 + inserts
-            first_idx_next = 1 + (i + 1) * num_pts + inserts
-
-            p1 = pts_list[last_idx]
-            p2 = pts_list[first_idx_next]
-            vec = p2 - p1
-            norm = np.linalg.norm(vec)
-
-            if norm < 1e-6: continue
-
-            cos_a = np.dot(vec, g_norm[i]) / norm
-            if np.arccos(np.clip(cos_a, -1, 1)) * 180 / np.pi > angle_deg:
-                v_proj = vec - np.dot(vec, g_norm[i]) * g_norm[i]
-                detour_vec, _, _ = self.__determine_detour_direction(v_proj, np.linalg.norm(v_proj), g_y[i], g_z[i])
-                
-                detour_pt = g_pos[i] + rad * detour_vec
-                pts_list.insert(last_idx + 1, detour_pt)
-                inserts += 1
-
-        return np.array(pts_list)
 
     # ==========================================================================
-    # CORE CONTROL FUNCTION (Merges Planner + MPC)
+    # CORE CONTROL FUNCTION
     # ==========================================================================
 
     def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None) -> NDArray[np.floating]:
         """
-        1. Checks for replanning triggers.
-        2. Samples the spline for the MPC horizon.
-        3. Solves the OCP.
+        1. Checks for replanning (Gates).
+        2. Identifies Closest Obstacle.
+        3. Updates MPC constraints (Deflection).
+        4. Solves.
         """
         current_time = min(self.__current_step * self._dt, self.FLIGHT_DURATION)
         
         if self.__current_step >= int(self.FLIGHT_DURATION * self.__control_freq):
             self._finished = True
 
-        # --- 1. Replanning Logic ---
+        # --- 1. Replanning Logic (Spline Update) ---
         if self.__check_for_env_update(obs):
-            # This updates self.__trajectory_spline
             self.__regenerate_flight_plan(obs, current_time)
 
-        # --- 2. Prepare MPC State (x0) ---
+        # --- 2. Obstacle Detection for MPC ---
+        drone_pos_2d = obs["pos"][:2]
+        obstacle_positions = obs["obstacles_pos"][:, :2] # 2D positions
+        
+        # Calculate distances to all obstacles
+        dists = np.linalg.norm(obstacle_positions - drone_pos_2d, axis=1)
+        closest_idx = np.argmin(dists)
+        closest_dist = dists[closest_idx]
+        
+        closest_obs_pos = obstacle_positions[closest_idx]
+        
+        # Calculate required safety distance squared
+        # (r_obs + r_drone + margin)^2
+        safe_dist_total = self.OBSTACLE_RADIUS_REAL + self.DRONE_RADIUS + self.SAFETY_MARGIN
+        min_safe_dist_sq = safe_dist_total**2
+        
+        # Create parameter vector: [obs_x, obs_y, min_safe_dist_sq]
+        # If obstacle is very far (> 3m), we can relax constraint effectively by moving it far away
+        # But keeping it active is safer.
+        p_val = np.array([closest_obs_pos[0], closest_obs_pos[1], min_safe_dist_sq])
+
+        # --- 3. Prepare MPC State (x0) ---
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
         x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
         
-        # Constrain initial state for solver
         self._acados_ocp_solver.set(0, "lbx", x0)
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        # --- 3. Generate Horizon References from Spline ---
-        # Generate time steps for the prediction horizon: [t, t+dt, t+2dt, ..., t+N*dt]
+        # --- 4. Generate Horizon References & Update Parameters ---
         horizon_times = np.linspace(current_time, current_time + self._T_HORIZON, self.MPC_HORIZON_STEPS)
-        
-        # Clamp times to flight duration (spline is only defined up to FLIGHT_DURATION)
         horizon_times = np.clip(horizon_times, 0, self.FLIGHT_DURATION)
 
-        # Sample Position and Velocity from the Spline
         ref_pos_horizon = self.__trajectory_spline(horizon_times)       # (N, 3)
         ref_vel_horizon = self.__trajectory_spline(horizon_times, nu=1) # (N, 3)
         
-        # Set References in Solver
         for k in range(self.MPC_HORIZON_STEPS):
             yref = np.zeros(self._ny)
-            
-            # Position Reference
             yref[0:3] = ref_pos_horizon[k]
-            
-            # Orientation Reference (Roll, Pitch, Yaw)
-            # Roll/Pitch = 0. Yaw = 0 (Can be improved to face velocity vector)
-            yref[3:6] = np.zeros(3) 
-
-            # Velocity Reference
             yref[6:9] = ref_vel_horizon[k]
-            
-            # Angular Rate Reference (0)
-            yref[9:12] = np.zeros(3)
-            
-            # Input Reference (Hover Thrust)
             yref[15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
 
             self._acados_ocp_solver.set(k, "yref", yref)
+            
+            # UPDATE PARAMETER (Obstacle Constraint)
+            # We assume the obstacle is static or we use the current closest one for the whole horizon
+            self._acados_ocp_solver.set(k, "p", p_val)
 
-        # --- 4. Final Step Reference (Terminal Cost) ---
-        # Sample terminal point
+        # Terminal
         t_final = min(current_time + self._T_HORIZON, self.FLIGHT_DURATION)
         ref_pos_final = self.__trajectory_spline(t_final)
         ref_vel_final = self.__trajectory_spline(t_final, nu=1)
@@ -472,13 +402,19 @@ class MPCSplineController(Controller):
         yref_e[0:3] = ref_pos_final
         yref_e[6:9] = ref_vel_final
         self._acados_ocp_solver.set(self.MPC_HORIZON_STEPS, "y_ref", yref_e)
+        
+        # Need to set parameter for terminal stage too if using cost/constraints there depending on formulation
+        # Acados parameters are usually required for all stages defined in model
+        # Our model defines 'p', so we must set it even if not strictly used in a terminal cost
+        # (Though constraints are usually distinct for terminal)
+        # Note: We didn't add the constraint to the terminal stage explicitly in create_ocp, 
+        # but parameters might still be expected by the C-function interfaces.
+        # self._acados_ocp_solver.set(self.MPC_HORIZON_STEPS, "p", p_val) 
+        # (Safest to skip unless we explicitly added constraints to terminal)
 
         # --- 5. Solve ---
         status = self._acados_ocp_solver.solve()
         
-        # Check status if needed (0 = success)
-        # if status != 0: print(f"Acados returned status {status}")
-
         # Get control input
         u0 = self._acados_ocp_solver.get(0, "u")
         

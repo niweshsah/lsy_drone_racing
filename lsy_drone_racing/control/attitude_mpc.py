@@ -25,9 +25,10 @@ from lsy_drone_racing.control import Controller
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-
+# This creates an acados model from the symbolic drone model.
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
+    
     X_dot, X, U, _ = symbolic_dynamics_euler(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
@@ -50,63 +51,56 @@ def create_acados_model(parameters: dict) -> AcadosModel:
 
     return model
 
-
+# This function creates the acados OCP and solver.
+# This is the main function to modify to change the MPC formulation.
 def create_ocp_solver(
     Tf: float, N: int, parameters: dict, verbose: bool = False
 ) -> tuple[AcadosOcpSolver, AcadosOcp]:
     """Creates an acados Optimal Control Problem and Solver."""
+    
     ocp = AcadosOcp()
 
     # Set model
     ocp.model = create_acados_model(parameters)
 
     # Get Dimensions
-    nx = ocp.model.x.rows()
-    nu = ocp.model.u.rows()
-    ny = nx + nu
-    ny_e = nx
+    nx = ocp.model.x.rows() # number of states
+    nu = ocp.model.u.rows() # Number of inputs (4: cmd_rpy, thrust)
+    ny = nx + nu  # Size of cost vector for intermediate steps
+    ny_e = nx  # Size of cost vector for the final step (no input)
 
     # Set dimensions
-    ocp.solver_options.N_horizon = N
+    ocp.solver_options.N_horizon = N # number of look-ahead steps
 
     ## Set Cost
     # For more Information regarding Cost Function Definition in Acados:
     # https://github.com/acados/acados/blob/main/docs/problem_formulation/problem_formulation_ocp_mex.pdf
-    #
 
     # Cost Type
+    # We use a linear least squares cost function
     ocp.cost.cost_type = "LINEAR_LS"
     ocp.cost.cost_type_e = "LINEAR_LS"
 
     # Weights
     # State weights
-    Q = np.diag(
-        [
-            50.0,  # pos
-            50.0,  # pos
-            400.0,  # pos
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            10.0,  # vel
-            10.0,  # vel
-            10.0,  # vel
-            5.0,  # drpy
-            5.0,  # drpy
-            5.0,  # drpy
-        ]
-    )
+    # This defines how "bad" it is to deviate from the trajectory.
+    
+    Q = np.diag([
+    50.0, 50.0, 400.0,  # Position (x, y, z)
+    1.0, 1.0, 1.0,      # Orientation (roll, pitch, yaw)
+    10.0, 10.0, 10.0,   # Velocity (vx, vy, vz)
+    5.0, 5.0, 5.0       # Angular Rates (p, q, r)
+])
+    
     # Input weights (reference is upright orientation and hover thrust)
-    R = np.diag(
-        [
-            1.0,  # rpy
-            1.0,  # rpy
-            1.0,  # rpy
-            50.0,  # thrust
-        ]
-    )
+    # this defines how "bad" it is to use control inputs.
+    R = np.diag([
+    1.0, 1.0, 1.0,  # Cmd Orientation
+    50.0            # Cmd Thrust
+])
 
     Q_e = Q.copy()
+    # combines state and input weights into single weight matrices
     ocp.cost.W = scipy.linalg.block_diag(Q, R)
     ocp.cost.W_e = Q_e
 
@@ -122,8 +116,11 @@ def create_ocp_solver(
     Vx_e[0:nx, 0:nx] = np.eye(nx)  # Select all states
     ocp.cost.Vx_e = Vx_e
 
+
     # Set initial references (we will overwrite these later on to make the controller track the traj.)
+    # Initially hover at origin with zero angles and zero velocities
     ocp.cost.yref, ocp.cost.yref_e = np.zeros((ny,)), np.zeros((ny_e,))
+
 
     # Set State Constraints (rpy < 30°)
     ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5])
@@ -135,6 +132,7 @@ def create_ocp_solver(
     ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
+
     # We have to set x0 even though we will overwrite it later on.
     ocp.constraints.x0 = np.zeros((nx))
 
@@ -145,6 +143,7 @@ def create_ocp_solver(
     ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
     ocp.solver_options.tol = 1e-6
 
+
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
 
@@ -154,6 +153,7 @@ def create_ocp_solver(
     # set prediction horizon
     ocp.solver_options.tf = Tf
 
+    # This triggers acados to write C code based on the Python definitions, compile it using gcc, and load it back into Python.
     acados_ocp_solver = AcadosOcpSolver(
         ocp,
         json_file="c_generated_code/lsy_example_mpc.json",

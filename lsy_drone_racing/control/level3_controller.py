@@ -1,5 +1,5 @@
 """This is a controller for level 3 drone racing environment.
-It is very similar to niwesh_final_controller.py but with added logic to replan the trajectory when it is inside the replan radius of any gate or obstacle.
+It is very similar to level2 controller but with added logic to replan the trajectory when it is inside the replan radius of any gate or obstacle.
 """  # noqa: D205
 
 
