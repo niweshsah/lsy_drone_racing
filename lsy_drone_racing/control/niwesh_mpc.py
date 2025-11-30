@@ -1,9 +1,8 @@
-"""
-Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
+"""Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
 Combines Level 3 replanning/obstacle avoidance with Acados NMPC.
-"""
+"""  # noqa: D205
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from typing import TYPE_CHECKING
 import numpy as np
@@ -237,6 +236,7 @@ class MPCSplineController(Controller):
         z_axes = rotation_matrices[:, :, 2]
         return normals, y_axes, z_axes
 
+
     def __generate_gate_approach_points(self, initial_pos, gate_pos, gate_norm, approach_dist=0.5, num_pts=5):
         offsets = np.linspace(-approach_dist, approach_dist, num_pts)
         gate_pos_exp = gate_pos[:, np.newaxis, :]
@@ -245,6 +245,7 @@ class MPCSplineController(Controller):
         waypoints_matrix = gate_pos_exp + offsets_exp * gate_norm_exp
         flat_waypoints = waypoints_matrix.reshape(-1, 3)
         return np.vstack([initial_pos, flat_waypoints])
+
 
     def __compute_trajectory_spline(self, total_time, path_points, custom_time_knots=None):
         if custom_time_knots is not None:
@@ -373,7 +374,7 @@ class MPCSplineController(Controller):
         elif 45 <= angle_deg < 135: return z_axis, "top", angle_deg
         else: return -y_axis, "left", angle_deg
 
-    def __add_detour_logic(self, path_points, g_pos, g_norm, g_y, g_z, num_pts=5, angle_deg=120.0, rad=0.65):
+    def __add_detour_logic(self, path_points, g_pos, g_norm, g_y, g_z, num_pts=5, angle_deg=120.0, rad=0.65):  # noqa: ANN001
         num_gates = g_pos.shape[0]
         pts_list = list(path_points)
         inserts = 0

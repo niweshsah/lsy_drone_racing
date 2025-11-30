@@ -176,8 +176,7 @@ def create_ocp_solver(Tf: float, N: int, parameters: dict) -> tuple[AcadosOcpSol
 # ==============================================================================
 
 class MPCSplineController(Controller):
-    """
-    Unified Controller.
+    """Unified Controller.
     Handles Spline Generation, Parallel Transport Frame calculation, 
     Tunnel Bounds (Gates/Obstacles), and MPC Solving.
     """
