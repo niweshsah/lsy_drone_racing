@@ -150,7 +150,7 @@ class MPCSplineController(Controller):
     """
     
     # Planner Constants
-    FLIGHT_DURATION = 25.0
+    FLIGHT_DURATION = 10.0
     REPLAN_RADIUS = 0.5
     OBSTACLE_CLEARANCE = 0.2
     

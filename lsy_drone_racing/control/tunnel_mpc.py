@@ -322,6 +322,8 @@ class SpatialMPCController(Controller):
         vel = obs["vel"]
         quat = obs["quat"] # Assuming [x,y,z,w] or [w,x,y,z]
         rot = obs["rpy"] if "rpy" in obs else R.from_quat(quat).as_euler('zyx')[::-1]
+
+        
         # Note: Model expects [phi, theta, psi] (Roll, Pitch, Yaw)
         
         # Map Cartesian -> Spatial
