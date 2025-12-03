@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize_scalar
-from parallel_transport import GeometryEngine # Update filename if needed
+from parallel_transport2 import GeometryEngine # Update filename if needed
 
 class SpatialTransformer:
     def __init__(self, geo_engine):

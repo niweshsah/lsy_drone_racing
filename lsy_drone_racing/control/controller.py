@@ -59,7 +59,7 @@ class Controller(ABC):
 
         Returns:
             A drone state command [x, y, z, vx, vy, vz, ax, ay, az, yaw, rrate, prate, yrate] in
-            absolute coordinates or an attitude command [thrust, roll, pitch, yaw] as a numpy array.
+            absolute coordinates or an attitude command [roll, pitch, yaw, thrust] as a numpy array.
         """
 
     def step_callback(

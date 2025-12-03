@@ -104,9 +104,32 @@ def create_ocp_solver(
     ocp.cost.W = scipy.linalg.block_diag(Q, R)
     ocp.cost.W_e = Q_e
 
+    # Stage cost for k = 0 to N-1 follows this structure:
+
+    # The cost is:
+
+    # 1/2 * ( Vx * x_k + Vu * u_k - y_ref_k )^T * W * ( Vx * x_k + Vu * u_k - y_ref_k )
+
+    # Terminal cost at k = N:
+
+    # 1/2 * ( Vx_e * x_N - y_ref_N )^T * W_e * ( Vx_e * x_N - y_ref_N )
+
+    # Meaning of the matrices:
+
+    # Vx selects which elements of the STATE vector appear inside the cost.
+
+    # Vu selects which elements of the CONTROL INPUT vector appear in the cost.
+
+    # Vx_e selects which states are penalized at the terminal step (only x_N, no inputs).
+
+    # In acados, the cost function does not automatically assume that you want to penalize x and u.
+    # Instead, you build an “output vector”:
+
     Vx = np.zeros((ny, nx))
+    # Set the state part to identity matrix
     Vx[0:nx, 0:nx] = np.eye(nx)  # Select all states
     ocp.cost.Vx = Vx
+
 
     Vu = np.zeros((ny, nu))
     Vu[nx : nx + nu, :] = np.eye(nu)  # Select all actions
@@ -134,6 +157,7 @@ def create_ocp_solver(
 
 
     # We have to set x0 even though we will overwrite it later on.
+    # xo is the initial state at time step 0.
     ocp.constraints.x0 = np.zeros((nx))
 
     # Solver Options
@@ -198,28 +222,49 @@ class AttitudeMPC(Controller):
             ]
         )
         self._t_total = 15  # s
+        
+        # create an evenly spaced time array for the waypoints
         t = np.linspace(0, self._t_total, len(waypoints))
+        
+        # create cubic spline interpolations for position and velocity
         self._des_pos_spline = CubicSpline(t, waypoints)
+        
+        # derivative of position spline gives velocity spline
         self._des_vel_spline = self._des_pos_spline.derivative()
+        
+        # This creates a time series of waypoints for the entire trajectory
         self._waypoints_pos = self._des_pos_spline(
             np.linspace(0, self._t_total, int(config.env.freq * self._t_total))
         )
+        
+        # same as above for velocity
         self._waypoints_vel = self._des_vel_spline(
             np.linspace(0, self._t_total, int(config.env.freq * self._t_total))
         )
+        
+        # set desired yaw to zero for all waypoints
         self._waypoints_yaw = self._waypoints_pos[:, 0] * 0
 
+        # Load drone parameters
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
+        
+        # Create OCP solver
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
             self._T_HORIZON, self._N, self.drone_params
         )
+        
+        # set model dimension size for run-time use
         self._nx = self._ocp.model.x.rows()
         self._nu = self._ocp.model.u.rows()
         self._ny = self._nx + self._nu
         self._ny_e = self._nx
 
         self._tick = 0
+        
+        # max tick
+        # We subtract N to ensure we have enough waypoints to fill the horizon
         self._tick_max = len(self._waypoints_pos) - 1 - self._N
+        
         self._config = config
         self._finished = False
 
@@ -236,31 +281,50 @@ class AttitudeMPC(Controller):
         Returns:
             The orientation as roll, pitch, yaw angles, and the collective thrust [r_des, p_des, y_des, t_des] as a numpy array.
         """
+        # initialize index for waypoints
         i = min(self._tick, self._tick_max)
         if self._tick >= self._tick_max:
             self._finished = True
 
         # Setting initial state
+        # create rpy and drpy from quat and ang_vel as they are not provided in obs
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
+        
+        # concatenate position, orientation, velocity, and angular velocity into state vector
         x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
-        self._acados_ocp_solver.set(0, "lbx", x0)
+        
+        # Set the stage-0 state bounds to x0
+        self._acados_ocp_solver.set(0, "lbx", x0) # stage, bound type, value
         self._acados_ocp_solver.set(0, "ubx", x0)
 
-        # Setting state reference
-        yref = np.zeros((self._N, self._ny))
-        yref[:, 0:3] = self._waypoints_pos[i : i + self._N]  # position
-        # zero roll, pitch
-        yref[:, 5] = self._waypoints_yaw[i : i + self._N]  # yaw
-        yref[:, 6:9] = self._waypoints_vel[i : i + self._N]  # velocity
-        # zero drpy
 
-        # Setting input reference (index > self._nx)
-        # zero rpy
-        # hover thrust
+        # Setting state reference
+        # initialize yref with zeros
+        
+        # y_ref is a (N x ny) matrix where each row is the reference for that time step
+        yref = np.zeros((self._N, self._ny))
+        
+        # Setting intermediate state references
+        yref[:, 0:3] = self._waypoints_pos[i : i + self._N]  # position
+        
+        
+        # zero roll, pitch
+        # no roll or pitch tracking
+        yref[:, 5] = self._waypoints_yaw[i : i + self._N]  # yaw
+        
+        # velocity tracking
+        yref[:, 6:9] = self._waypoints_vel[i : i + self._N]  # velocity
+
+        # set thrust reference to hover thrust
         yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+        
+        # Note: roll, pitch and yaw are all 0 always
+        
+        # Apply references to the solver from stage 0 to N-1
         for j in range(self._N):
             self._acados_ocp_solver.set(j, "yref", yref[j])
+
 
         # Setting final state reference
         yref_e = np.zeros((self._ny_e))
@@ -268,11 +332,17 @@ class AttitudeMPC(Controller):
         # zero roll, pitch
         yref_e[5] = self._waypoints_yaw[i + self._N]  # yaw
         yref_e[6:9] = self._waypoints_vel[i + self._N]  # velocity
-        # zero drpy
-        self._acados_ocp_solver.set(self._N, "y_ref", yref_e)
 
+        # set thrust reference to hover thrust
+        self._acados_ocp_solver.set(self._N, "yref_e", yref_e)
+
+        
         # Solving problem and getting first input
+        # Run the solver to minimize the OCP given current x0, yref for all stages, and constraints. The solver will compute the optimal sequence of inputs and states across the horizon.
+        
         self._acados_ocp_solver.solve()
+        
+        # returns the optimal control input at stage 0
         u0 = self._acados_ocp_solver.get(0, "u")
 
         return u0

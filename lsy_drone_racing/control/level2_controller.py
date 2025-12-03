@@ -87,6 +87,8 @@ class MyController(Controller):
         self.__debug_initial_wps = None
         self.__debug_post_detour_wps = None
         self.__debug_final_wps = None
+        
+        print("observation:",initial_obs)
 
         # Extract Environment geometry
         self.__gate_positions = initial_obs["gates_pos"]
