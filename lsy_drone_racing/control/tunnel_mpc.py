@@ -7,14 +7,11 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 import os
 import shutil
 from lsy_drone_racing.control import Controller
-
-# Import the Base Class (assuming it's in a file named base_controller.py or similar context)
-# from base_controller import Controller 
-# Since I am writing the implementation here, I will treat the class provided in the prompt as the parent.
-
-# ==============================================================================
-# 1. HELPER CLASSES (Geometry & MPC)
-# ==============================================================================
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+from datetime import datetime
+import json
 
 def get_drone_params():
     return {
@@ -24,6 +21,15 @@ def get_drone_params():
         "thrust_min": 0.05,
         "tau_att": 0.1,
     }
+
+"cf21B_500": {
+                "mass": 0.04338,
+                "gravity_vec": np.array([0.0, 0.0, -9.81]),
+                "J": np.diag([25e-6, 28e-6, 49e-6]),
+                "L": 0.035355, # 'L' in config
+                "thrust2torque": 0.00593893393599368, # 'thrust2torque'
+                "thrust_max_per_motor": 0.2,
+            },
 
 class GeometryEngine:
     def __init__(self, gates_pos, start_pos):
@@ -270,7 +276,7 @@ class SpatialMPCController(Controller):
         
         # 1. Physics & Configuration
         self.params = get_drone_params()
-        self.v_target = 6.0  # m/s target speed
+        self.v_target = 2.0  # m/s target speed
         
         # 2. Geometry Setup
         # Assuming config structure based on provided context.
@@ -291,6 +297,23 @@ class SpatialMPCController(Controller):
         # 4. Internal State
         self.prev_s = 0.0
         self.last_u = np.array([0.0, 0.0, 0.0, self.params['mass'] * self.params['g']])
+        
+        # 5. Debug & Logging
+        self.debug = True  # Enable/disable debug prints
+        self.control_log = {
+            'timestamps': [],
+            'phi_c': [],
+            'theta_c': [],
+            'psi_c': [],
+            'thrust_c': [],
+            'solver_status': [],
+            's': [],
+            'w1': [],
+            'w2': [],
+            'ds': []
+        }
+        self.episode_start_time = datetime.now()
+        self.step_count = 0
         
         # Initial Warm Start
         self.reset_mpc_solver()
@@ -382,7 +405,12 @@ class SpatialMPCController(Controller):
         # MPC outputs: [phi_c, th_c, psi_c, Thrust_c]
         # Return: [roll, pitch, yaw, thrust]
         # Ensure Thrust is scalar
-        return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
+        output = np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
+        
+        # 6. DEBUG LOGGING
+        self._log_control_step(x_spatial, u_opt, status)
+        
+        return output
 
     def _cartesian_to_spatial(self, pos, vel, rpy):
         """Projects global state onto the path frame."""
@@ -418,3 +446,177 @@ class SpatialMPCController(Controller):
     def episode_reset(self):
         """Reset the controller's internal state and models."""
         self.reset()
+
+    def step_callback(self, action, obs, reward, terminated, truncated, info):
+        """Called at each environment step. Returns False to keep running."""
+        return False
+
+    def episode_callback(self):
+        """Called at the end of each episode. Generate plots here."""
+        if len(self.control_log['timestamps']) > 0:
+            self.plot_all_diagnostics()
+        return
+
+    def _log_control_step(self, x_spatial: np.ndarray, u_opt: np.ndarray, solver_status: int):
+        """Log control values and state for debugging."""
+        self.step_count += 1
+        elapsed_time = (datetime.now() - self.episode_start_time).total_seconds()
+        
+        # Log data
+        self.control_log['timestamps'].append(elapsed_time)
+        self.control_log['phi_c'].append(float(u_opt[0]))
+        self.control_log['theta_c'].append(float(u_opt[1]))
+        self.control_log['psi_c'].append(float(u_opt[2]))
+        self.control_log['thrust_c'].append(float(u_opt[3]))
+        self.control_log['solver_status'].append(int(solver_status))
+        self.control_log['s'].append(float(x_spatial[0]))
+        self.control_log['w1'].append(float(x_spatial[1]))
+        self.control_log['w2'].append(float(x_spatial[2]))
+        self.control_log['ds'].append(float(x_spatial[3]))
+        
+        # Console print
+        if self.debug:
+            print(f"[Step {self.step_count}] t={elapsed_time:.3f}s | "
+                  f"φ_c={u_opt[0]:+.4f} θ_c={u_opt[1]:+.4f} ψ_c={u_opt[2]:+.4f} T_c={u_opt[3]:.4f} | "
+                  f"s={x_spatial[0]:.2f} w1={x_spatial[1]:+.4f} w2={x_spatial[2]:+.4f} ds={x_spatial[3]:.3f} | "
+                  f"Status={solver_status}")
+
+    def save_control_log(self, filepath: str = None):
+        """Save control log to JSON file."""
+        if filepath is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            filepath = f"control_log_{timestamp}.json"
+        
+        with open(filepath, 'w') as f:
+            json.dump(self.control_log, f, indent=2)
+        
+        if self.debug:
+            print(f"\nControl log saved to: {filepath}")
+        return filepath
+
+    def plot_control_values(self, figsize=(16, 10), save_path: str = None):
+        """Plot control values over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No control data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        
+        fig, axes = plt.subplots(3, 2, figsize=figsize)
+        fig.suptitle('MPC Control Values & State Feedback', fontsize=16, fontweight='bold')
+        
+        # Row 1: Attitude Commands
+        ax = axes[0, 0]
+        ax.plot(t, self.control_log['phi_c'], 'b-', linewidth=2, label='φ_c (Roll)')
+        ax.set_ylabel('Roll Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[0, 1]
+        ax.plot(t, self.control_log['theta_c'], 'g-', linewidth=2, label='θ_c (Pitch)')
+        ax.set_ylabel('Pitch Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 2: Thrust & Yaw
+        ax = axes[1, 0]
+        ax.plot(t, self.control_log['thrust_c'], 'r-', linewidth=2, label='T_c (Thrust)')
+        ax.axhline(y=self.params['mass'] * self.params['g'], color='k', linestyle='--', 
+                   label='Hover Thrust', alpha=0.5)
+        ax.set_ylabel('Thrust Command (N)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[1, 1]
+        ax.plot(t, self.control_log['psi_c'], 'm-', linewidth=2, label='ψ_c (Yaw)')
+        ax.set_ylabel('Yaw Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 3: Path-following state
+        ax = axes[2, 0]
+        ax.plot(t, self.control_log['s'], 'c-', linewidth=2, label='s (Arc length)')
+        ax.set_ylabel('Arc Length (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[2, 1]
+        ax.plot(t, self.control_log['w1'], 'orange', linewidth=2, label='w1 (Lateral)')
+        ax.plot(t, self.control_log['w2'], 'purple', linewidth=2, label='w2 (Vertical)')
+        ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='Bounds')
+        ax.axhline(y=-0.5, color='r', linestyle='--', alpha=0.5)
+        ax.set_ylabel('Lateral/Vertical Error (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"control_plot_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Control plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+
+    def plot_solver_status(self, save_path: str = None):
+        """Plot solver status over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        status = np.array(self.control_log['solver_status'])
+        
+        fig, ax = plt.subplots(figsize=(12, 4))
+        
+        # Color code: green=0 (success), red=non-zero (failure)
+        colors = ['green' if s == 0 else 'red' for s in status]
+        ax.scatter(t, status, c=colors, s=50, alpha=0.6, edgecolors='black')
+        
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.set_ylabel('Solver Status', fontweight='bold')
+        ax.set_title('MPC Solver Status Over Time (Green=Success, Red=Failure)', 
+                     fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.5, max(status) + 1)
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"solver_status_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Solver status plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+
+    def plot_all_diagnostics(self, save_dir: str = None):
+        """Generate all diagnostic plots at once."""
+        if save_dir is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_dir = f"mpc_diagnostics_{timestamp}"
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        log_file = self.save_control_log(os.path.join(save_dir, "control_log.json"))
+        control_plot = self.plot_control_values(save_path=os.path.join(save_dir, "control_values.png"))
+        status_plot = self.plot_solver_status(save_path=os.path.join(save_dir, "solver_status.png"))
+        
+        if self.debug:
+            print(f"\n{'='*60}")
+            print(f"All diagnostics saved to: {save_dir}")
+            print(f"  - {log_file}")
+            print(f"  - {control_plot}")
+            print(f"  - {status_plot}")
+            print(f"{'='*60}")
+        
+        return save_dir

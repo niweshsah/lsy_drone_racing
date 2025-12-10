@@ -18,6 +18,7 @@ from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
 # standalone if the 'drone_models' package path isn't set in the shell.
 try:
     from drone_models.core import load_params
+    
 except ImportError:
     print("[WARN] Could not import 'drone_models'. Using mock parameter loader.")
     def load_params(model_type, config_node):
