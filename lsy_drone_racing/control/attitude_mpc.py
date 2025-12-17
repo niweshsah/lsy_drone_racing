@@ -334,7 +334,7 @@ class AttitudeMPC(Controller):
         yref_e[6:9] = self._waypoints_vel[i + self._N]  # velocity
 
         # set thrust reference to hover thrust
-        self._acados_ocp_solver.set(self._N, "yref_e", yref_e)
+        self._acados_ocp_solver.set(self._N, "yref", yref_e)
 
         
         # Solving problem and getting first input

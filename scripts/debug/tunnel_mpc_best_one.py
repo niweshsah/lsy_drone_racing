@@ -26,6 +26,7 @@ def get_drone_params():
         "tau_att": 0.1,   # Time constant for attitude tracking
     }
 
+
 # ==============================================================================
 # 2. GEOMETRY ENGINE (Spatial Frame Generation)
 # ==============================================================================
@@ -114,6 +115,8 @@ class GeometryEngine:
         idx = np.searchsorted(self.pt_frame['s'], s_query) - 1
         idx = np.clip(idx, 0, len(self.pt_frame['s'])-1)
         return {k: self.pt_frame[k][idx] for k in self.pt_frame if k != 's'}
+
+
 
 # ==============================================================================
 # 3. ACADOS MODEL (Spatial Reformulation)

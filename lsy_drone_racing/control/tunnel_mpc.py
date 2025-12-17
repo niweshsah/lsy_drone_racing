@@ -12,24 +12,36 @@ matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 from datetime import datetime
 import json
+from drone_models.core import load_params
+
 
 def get_drone_params():
-    return {
-        "mass": 0.04338, 
-        "g": 9.81,
-        "thrust_max": 0.60,
-        "thrust_min": 0.05,
-        "tau_att": 0.1,
-    }
 
-"cf21B_500": {
-                "mass": 0.04338,
+    # Load default drone parameters
+
+    params = load_params("so_rpy", "cf21B_500")
+
+    if params is not None:
+        return params
+
+    else:
+        return {
+            "mass": 0.04338,
                 "gravity_vec": np.array([0.0, 0.0, -9.81]),
                 "J": np.diag([25e-6, 28e-6, 49e-6]),
                 "L": 0.035355, # 'L' in config
                 "thrust2torque": 0.00593893393599368, # 'thrust2torque'
                 "thrust_max_per_motor": 0.2,
-            },
+                "acc_coef": np.array([1.0, 1.0, 1.0]),
+                "acc_coef": 0.0,
+                "cmd_f_coef": 0.96836458,
+                "rpy_coef": [-188.9910, -188.9910, -138.3109],
+                "rpy_rates_coef": [-12.7803, -12.7803, -16.8485],
+                "cmd_rpy_coef": [138.0834, 138.0834, 198.5161]
+
+        }
+
+
 
 class GeometryEngine:
     def __init__(self, gates_pos, start_pos):
@@ -127,6 +139,7 @@ class GeometryEngine:
         dists = np.linalg.norm(candidates_pos - pos_query, axis=1)
         idx_min = np.argmin(dists)
         return candidates_s[idx_min]
+
 
 def export_model(params):
     model = AcadosModel()
