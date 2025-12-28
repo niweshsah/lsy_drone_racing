@@ -1,503 +1,756 @@
-"""
-Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
-Combines Level 3 replanning/obstacle avoidance with Acados NMPC.
-"""
+import json
+import os
+import shutil
+from datetime import datetime
+from multiprocessing import Array
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+import casadi as ca
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg
-from scipy.interpolate import CubicSpline
+from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
+from drone_models.core import load_params
+from drone_models.utils.rotation import ang_vel2rpy_rates
+from scipy.interpolate import CubicHermiteSpline
 from scipy.spatial.transform import Rotation as R
 
-# Acados Imports
-from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
+from lsy_drone_racing.control.controller import Controller
 
-# Drone Environment Imports
-from drone_models.core import load_params
-from drone_models.so_rpy import symbolic_dynamics_euler
-from drone_models.utils.rotation import ang_vel2rpy_rates
-from lsy_drone_racing.control import Controller
-from lsy_drone_racing.utils.utils import draw_line
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
+# Use non-interactive backend for saving plots
+matplotlib.use('Agg')
 
 # ==============================================================================
-# ACADOS MODEL & SOLVER GENERATION (From your MPC Code)
+# 1. PARAMETERS & DYNAMICS
 # ==============================================================================
 
-def create_acados_model(parameters: dict) -> AcadosModel:
-    """Creates an acados model from a symbolic drone_model."""
-    X_dot, X, U, _ = symbolic_dynamics_euler(
-        mass=parameters["mass"],
-        gravity_vec=parameters["gravity_vec"],
-        J=parameters["J"],
-        J_inv=parameters["J_inv"],
-        acc_coef=parameters["acc_coef"],
-        cmd_f_coef=parameters["cmd_f_coef"],
-        rpy_coef=parameters["rpy_coef"],
-        rpy_rates_coef=parameters["rpy_rates_coef"],
-        cmd_rpy_coef=parameters["cmd_rpy_coef"],
+def get_drone_params():  # noqa: ANN201
+    """Defines physical parameters and System-ID coefficients."""
+    # Attempt to load from file, otherwise use defaults
+    params = load_params("so_rpy", "cf21B_500")
+
+    if params is not None:
+        # Ensure consistency in return type if loaded from file
+        return params
+    else:
+        return {
+            "mass": 0.04338,
+            "gravity_vec": np.array([0.0, 0.0, -9.81]),
+            "g": 9.81, # Added for convenience
+            "J": np.diag([25e-6, 28e-6, 49e-6]),
+            "J_inv": np.linalg.inv(np.diag([25e-6, 28e-6, 49e-6])),
+            "thrust_min": 0.0,
+            "thrust_max": 0.8, # Normalized or Newtons depending on cmd_f_coef
+            # System ID Coefficients (Linear Response Model)
+            "acc_coef": 0.0, # Bias term for thrust curve
+            "cmd_f_coef": 0.96836458, # Slope for thrust curve
+            "rpy_coef": [-188.9910, -188.9910, -138.3109],       # Stiffness
+            "rpy_rates_coef": [-12.7803, -12.7803, -16.8485],    # Damping
+            "cmd_rpy_coef": [138.0834, 138.0834, 198.5161]       # Input Gain
+        }
+
+def symbolic_dynamics_spatial(
+    mass: float,
+    gravity_vec: np.ndarray,
+    J: np.ndarray,
+    J_inv: np.ndarray,
+    acc_coef: float,
+    cmd_f_coef: float,
+    rpy_coef: list,
+    rpy_rates_coef: list,
+    cmd_rpy_coef: list,
+) -> tuple[ca.MX, ca.MX, ca.MX, ca.MX]:
+    
+    # --- 1. State Vector X (12 States) ---
+    # [cite: 302] States: s, w1, w2, ds, dw1, dw2, phi, theta, psi, dphi, dtheta, dpsi
+    s, w1, w2 = ca.SX.sym('s'), ca.SX.sym('w1'), ca.SX.sym('w2')
+    ds, dw1, dw2 = ca.SX.sym('ds'), ca.SX.sym('dw1'), ca.SX.sym('dw2')
+    
+    phi, theta, psi = ca.SX.sym('phi'), ca.SX.sym('theta'), ca.SX.sym('psi')
+    dphi, dtheta, dpsi = ca.SX.sym('dphi'), ca.SX.sym('dtheta'), ca.SX.sym('dpsi')
+
+    rpy = ca.vertcat(phi, theta, psi)
+    drpy = ca.vertcat(dphi, dtheta, dpsi)
+
+    X = ca.vertcat(s, w1, w2, ds, dw1, dw2, rpy, drpy)
+
+    # --- 2. Control Input U (4 Inputs) ---
+    phi_c, theta_c, psi_c, T_c = ca.SX.sym('phi_c'), ca.SX.sym('theta_c'), ca.SX.sym('psi_c'), ca.SX.sym('T_c')
+    cmd_rpy = ca.vertcat(phi_c, theta_c, psi_c)
+    U = ca.vertcat(cmd_rpy, T_c)
+
+    # --- 3. Parameters P (13 Elements) ---
+    # [cite: 299] Dependencies on t, n1, n2, k1, k2 and their derivatives
+    t_vec = ca.SX.sym('t_vec', 3)
+    n1_vec = ca.SX.sym('n1_vec', 3)
+    n2_vec = ca.SX.sym('n2_vec', 3)
+    k1, k2 = ca.SX.sym('k1'), ca.SX.sym('k2') 
+    dk1, dk2 = ca.SX.sym('dk1'), ca.SX.sym('dk2') # Spatial derivatives of curvature
+    
+    # ORDER MATTERS: This must match the order in the Controller loop exactly
+    P = ca.vertcat(t_vec, n1_vec, n2_vec, k1, k2, dk1, dk2)
+
+    # --- 4. Physics Engine ---
+
+    # A. Rotational Dynamics (Fitted Linear Model)
+    # ddrpy = Stiffness * angle + Damping * rate + Gain * command
+    c_rpy = ca.DM(rpy_coef)
+    c_drpy = ca.DM(rpy_rates_coef)
+    c_cmd = ca.DM(cmd_rpy_coef)
+
+    ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy 
+
+    # B. Translational Acceleration (Inertial Frame)
+    thrust_mag = acc_coef + cmd_f_coef * T_c
+    F_body = ca.vertcat(0, 0, thrust_mag)
+    
+    # Rotation Matrix (Body -> Inertial)
+    cx, cy, cz = ca.cos(phi), ca.cos(theta), ca.cos(psi)
+    sx, sy, sz = ca.sin(phi), ca.sin(theta), ca.sin(psi)
+    
+    R_IB = ca.vertcat(
+        ca.horzcat(cy*cz,              cz*sx*sy - cx*sz,   sx*sz + cx*cz*sy),
+        ca.horzcat(cy*sz,              cx*cz + sx*sy*sz,   cx*sy*sz - cz*sx),
+        ca.horzcat(-sy,                cy*sx,              cx*cy)
+    )
+
+    # Global Acceleration [cite: 166]
+    g_vec_sym = ca.DM(gravity_vec)
+    acc_world = g_vec_sym + (R_IB @ F_body) / mass
+
+    # C. Spatial Dynamics Reconstruction 
+    # h is the scaling factor for path curvature
+    h = 1 - k1*w1 - k2*w2
+    
+    # h_dot requires dk1/dk2 (Chain rule: d/dt = d/ds * ds/dt)
+    h_dot = -(k1*dw1 + k2*dw2 + (dk1*w1 + dk2*w2)*ds) 
+
+    coriolis = (
+        (ds * h_dot) * t_vec +
+        (ds**2 * h * k1) * n1_vec +
+        (ds**2 * h * k2) * n2_vec -
+        (ds * dw1 * k1) * t_vec -
+        (ds * dw2 * k2) * t_vec
+    )
+
+    # Project World Acceleration onto Path Frame
+    proj_t = ca.dot(t_vec, acc_world - coriolis) 
+    dds = proj_t / h 
+    ddw1 = ca.dot(n1_vec, acc_world - coriolis)
+    ddw2 = ca.dot(n2_vec, acc_world - coriolis)
+
+    # --- 5. Final Time Derivative ---
+    X_Dot = ca.vertcat(
+        ds,     # s_dot
+        dw1,    # w1_dot
+        dw2,    # w2_dot
+        dds,    # s_ddot
+        ddw1,   # w1_ddot
+        ddw2,   # w2_ddot
+        drpy,   # rpy_dot
+        ddrpy   # rpy_ddot
+    )
+
+    return X_Dot, X, U, P
+
+def export_model(params: dict) -> AcadosModel:
+    X_dot, X, U, P = symbolic_dynamics_spatial(
+        mass=params["mass"],
+        gravity_vec=params["gravity_vec"],
+        J=params["J"],
+        J_inv=params.get("J_inv"),
+        acc_coef=params["acc_coef"],
+        cmd_f_coef=params["cmd_f_coef"],
+        rpy_coef=params["rpy_coef"],
+        rpy_rates_coef=params["rpy_rates_coef"],
+        cmd_rpy_coef=params["cmd_rpy_coef"],
     )
 
     model = AcadosModel()
-    model.name = "mpc_spline_tracker"
+    model.name = "spatial_mpc_drone"
     model.f_expl_expr = X_dot
     model.f_impl_expr = None
     model.x = X
     model.u = U
+    model.p = P
+
     return model
 
-
-def create_ocp_solver(
-    Tf: float, N: int, parameters: dict, verbose: bool = False
-) -> tuple[AcadosOcpSolver, AcadosOcp]:
-    """Creates an acados Optimal Control Problem and Solver."""
-    ocp = AcadosOcp()
-    ocp.model = create_acados_model(parameters)
-
-    # Dimensions
-    nx = ocp.model.x.rows()
-    nu = ocp.model.u.rows()
-    ny = nx + nu
-    ny_e = nx
-
-    ocp.solver_options.N_horizon = N
-
-    # Cost
-    ocp.cost.cost_type = "LINEAR_LS"
-    ocp.cost.cost_type_e = "LINEAR_LS"
-
-    # Weights
-    Q = np.diag([
-        50.0, 50.0, 400.0,  # Position (x, y, z)
-        1.0, 1.0, 1.0,      # Orientation (roll, pitch, yaw)
-        10.0, 10.0, 10.0,   # Velocity (vx, vy, vz)
-        5.0, 5.0, 5.0       # Angular Rates (p, q, r)
-    ])
-    
-    # Input weights
-    R_mat = np.diag([
-        1.0, 1.0, 1.0,  # Cmd Orientation
-        50.0            # Cmd Thrust
-    ])
-
-    ocp.cost.W = scipy.linalg.block_diag(Q, R_mat)
-    ocp.cost.W_e = Q
-
-    # Output selection matrices
-    Vx = np.zeros((ny, nx))
-    Vx[0:nx, 0:nx] = np.eye(nx)
-    ocp.cost.Vx = Vx
-
-    Vu = np.zeros((ny, nu))
-    Vu[nx : nx + nu, :] = np.eye(nu)
-    ocp.cost.Vu = Vu
-
-    Vx_e = np.zeros((ny_e, nx))
-    Vx_e[0:nx, 0:nx] = np.eye(nx)
-    ocp.cost.Vx_e = Vx_e
-
-    # Initial references (will be updated online)
-    ocp.cost.yref = np.zeros((ny,))
-    ocp.cost.yref_e = np.zeros((ny_e,))
-
-    # Constraints
-    ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5]) # Max roll/pitch/yaw
-    ocp.constraints.ubx = np.array([0.5, 0.5, 0.5])
-    ocp.constraints.idxbx = np.array([3, 4, 5])
-
-    ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, parameters["thrust_min"] * 4])
-    ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
-    ocp.constraints.idxbu = np.array([0, 1, 2, 3])
-
-    ocp.constraints.x0 = np.zeros((nx))
-
-    # Solver Options
-    ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"
-    ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
-    ocp.solver_options.integrator_type = "ERK"
-    ocp.solver_options.nlp_solver_type = "SQP"
-    ocp.solver_options.tol = 1e-6
-    ocp.solver_options.qp_solver_cond_N = N
-    ocp.solver_options.qp_solver_warm_start = 1
-    ocp.solver_options.qp_solver_iter_max = 20
-    ocp.solver_options.nlp_solver_max_iter = 50
-    ocp.solver_options.tf = Tf
-
-    solver = AcadosOcpSolver(
-        ocp,
-        json_file="c_generated_code/mpc_spline_tracker.json",
-        verbose=verbose,
-        build=True,
-        generate=True,
-    )
-
-    return solver, ocp
-
-
 # ==============================================================================
-# MERGED CONTROLLER CLASS
+# 2. GEOMETRY ENGINE
 # ==============================================================================
 
-class MPCSplineController(Controller):
-    """
-    Controller that combines High-Level Spline Replanning (Obstacles/Gates)
-    with Low-Level MPC tracking.
-    """
-    
-    # Planner Constants
-    FLIGHT_DURATION = 10.0
-    REPLAN_RADIUS = 0.5
-    OBSTACLE_CLEARANCE = 0.2
-    
-    # MPC Constants
-    MPC_HORIZON_STEPS = 25  # N
-
-    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict):
-        super().__init__(initial_obs, info, sim_config)
-
-        # ---------------------------------------------------------
-        # 1. Initialize Planner State (From MyController)
-        # ---------------------------------------------------------
-        self.__initialize_planner_state(initial_obs, sim_config)
-        self.__plan_initial_trajectory(initial_obs)
-
-        # ---------------------------------------------------------
-        # 2. Initialize MPC Solver (From AttitudeMPC)
-        # ---------------------------------------------------------
-        self._dt = 1 / sim_config.env.freq
-        self._T_HORIZON = self.MPC_HORIZON_STEPS * self._dt
-
-        self.drone_params = load_params("so_rpy", sim_config.sim.drone_model)
+class GeometryEngine:
+    def __init__(self, gates_pos, start_pos):
+        self.gates_pos = np.asarray(gates_pos)
+        self.start_pos = np.asarray(start_pos)
         
-        # Create Solver
-        self._acados_ocp_solver, self._ocp = create_ocp_solver(
-            self._T_HORIZON, self.MPC_HORIZON_STEPS, self.drone_params
-        )
 
-        # Cache dimensions
-        self._nx = self._ocp.model.x.rows()
-        self._nu = self._ocp.model.u.rows()
-        self._ny = self._nx + self._nu
-        self._ny_e = self._nx
+        # 1. Waypoints
+        self.waypoints = np.vstack((self.start_pos, self.gates_pos))
         
-        self._finished = False
-
-    # --------------------------------------------------------------------------
-    # PLANNER LOGIC (Private methods from MyController)
-    # --------------------------------------------------------------------------
-
-    def __initialize_planner_state(self, initial_obs, sim_config):
-        self.__current_step = 0
-        self.__control_freq = sim_config.env.freq
-        
-        # Replan flags
-        self.__last_gate_flags = None
-        self.__last_obstacle_flags = None
-
-        # Environment Geometry
-        self.__gate_positions = initial_obs["gates_pos"]
-        self.__obstacle_positions = initial_obs["obstacles_pos"]
-        self.__start_position = initial_obs["pos"]
-        self.__gate_normals, self.__gate_y_axes, self.__gate_z_axes = self.__extract_gate_frames(
-            initial_obs["gates_quat"]
-        )
-        self.__trajectory_spline = None
-
-    def __plan_initial_trajectory(self, initial_obs):
-        # 1. Gates
-        path_points = self.__generate_gate_approach_points(
-            self.__start_position,
-            self.__gate_positions,
-            self.__gate_normals
-        )
-        # 2. Detours
-        path_points = self.__add_detour_logic(
-            path_points, self.__gate_positions, self.__gate_normals,
-            self.__gate_y_axes, self.__gate_z_axes
-        )
-        # 3. Obstacles
-        time_knots, path_points = self.__insert_obstacle_avoidance_points(
-            path_points, self.__obstacle_positions, self.OBSTACLE_CLEARANCE
-        )
-        # 4. Spline
-        self.__trajectory_spline = self.__compute_trajectory_spline(
-            self.FLIGHT_DURATION, path_points, custom_time_knots=time_knots
-        )
-
-    def __extract_gate_frames(self, gates_quaternions):
-        rotations = R.from_quat(gates_quaternions)
-        rotation_matrices = rotations.as_matrix()
-        normals = rotation_matrices[:, :, 0]
-        y_axes = rotation_matrices[:, :, 1]
-        z_axes = rotation_matrices[:, :, 2]
-        return normals, y_axes, z_axes
-
-    def __generate_gate_approach_points(self, initial_pos, gate_pos, gate_norm, approach_dist=0.5, num_pts=5):
-        offsets = np.linspace(-approach_dist, approach_dist, num_pts)
-        gate_pos_exp = gate_pos[:, np.newaxis, :]
-        gate_norm_exp = gate_norm[:, np.newaxis, :]
-        offsets_exp = offsets[np.newaxis, :, np.newaxis]
-        waypoints_matrix = gate_pos_exp + offsets_exp * gate_norm_exp
-        flat_waypoints = waypoints_matrix.reshape(-1, 3)
-        return np.vstack([initial_pos, flat_waypoints])
-
-    def __compute_trajectory_spline(self, total_time, path_points, custom_time_knots=None):
-        if custom_time_knots is not None:
-            return CubicSpline(custom_time_knots, path_points)
-        
-        path_segments = np.diff(path_points, axis=0)
-        segment_distances = np.linalg.norm(path_segments, axis=1)
-        cumulative_distance = np.concatenate([[0], np.cumsum(segment_distances)])
-        time_knots = cumulative_distance / cumulative_distance[-1] * total_time
-        return CubicSpline(time_knots, path_points)
-
-    def __process_single_obstacle(self, obs_center, sampled_points, sampled_times, clearance):
-        collision_free_times = []
-        collision_free_points = []
-        is_inside = False
-        entry_idx = None
-        obs_xy = obs_center[:2]
-
-        for i, point in enumerate(sampled_points):
-            dist_xy = np.linalg.norm(obs_xy - point[:2])
-
-            if dist_xy < clearance:
-                if not is_inside:
-                    is_inside = True
-                    entry_idx = i
-            elif is_inside:
-                # Exiting zone
-                is_inside = False
-                exit_idx = i
-                
-                entry_pt = sampled_points[entry_idx]
-                exit_pt = sampled_points[exit_idx]
-                
-                # Bisector avoidance
-                entry_vec = entry_pt[:2] - obs_xy
-                exit_vec = exit_pt[:2] - obs_xy
-                avoid_vec = entry_vec + exit_vec
-                norm_v = np.linalg.norm(avoid_vec)
-                if norm_v > 0: avoid_vec /= norm_v
-                
-                new_pos_xy = obs_xy + avoid_vec * clearance
-                new_pos_z = (entry_pt[2] + exit_pt[2]) / 2
-                new_wp = np.concatenate([new_pos_xy, [new_pos_z]])
-                
-                avg_time = (sampled_times[entry_idx] + sampled_times[exit_idx]) / 2
-                collision_free_times.append(avg_time)
-                collision_free_points.append(new_wp)
+        # 2. Tangents (Finite difference)
+        tangents = []
+        for i in range(len(self.waypoints)):
+            if i < len(self.waypoints) - 1:
+                t = self.waypoints[i+1] - self.waypoints[i]
             else:
-                collision_free_times.append(sampled_times[i])
-                collision_free_points.append(point)
+                t = self.waypoints[i] - self.waypoints[i-1]
+            norm = np.linalg.norm(t)
+            tangents.append(t / norm if norm > 1e-6 else np.array([1,0,0]))
+        self.tangents = np.array(tangents)
+
+        # 3. Spline Construction
+        # Calculate approximate arc length 's' for knots
+        dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
+        self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
+        self.total_length = self.s_knots[-1]
         
-        return np.array(collision_free_times), np.array(collision_free_points)
-
-    def __insert_obstacle_avoidance_points(self, path_points, obstacle_centers, clearance):
-        temp_spline = self.__compute_trajectory_spline(self.FLIGHT_DURATION, path_points)
-        num_samples = int(self.__control_freq * self.FLIGHT_DURATION)
-        sampled_times = np.linspace(0, self.FLIGHT_DURATION, num_samples)
-        sampled_points = temp_spline(sampled_times)
-
-        for obs_center in obstacle_centers:
-            sampled_times, sampled_points = self.__process_single_obstacle(
-                obs_center, sampled_points, sampled_times, clearance
-            )
-        return sampled_times, sampled_points
-
-    def __check_for_env_update(self, current_obs) -> bool:
-        """Trigger replan if gates/obstacles visited OR proximity danger."""
-        # 1. State Transitions
-        if self.__last_gate_flags is None:
-            self.__last_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-            self.__last_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
-            return False
-
-        current_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-        current_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
+        # Cubic Hermite Spline for position
+        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
         
-        gate_newly_hit = np.any((~self.__last_gate_flags) & current_gate_flags)
-        obstacle_newly_hit = np.any((~self.__last_obstacle_flags) & current_obstacle_flags)
+        # 4. Generate Pre-computed Frame Data
+        self.pt_frame = self._generate_parallel_transport_frame()
 
-        self.__last_gate_flags = current_gate_flags
-        self.__last_obstacle_flags = current_obstacle_flags
-
-        # 2. Proximity (RWI)
-        drone_pos = current_obs["pos"]
+    def _generate_parallel_transport_frame(self, num_points=3000):
+        """Generates the Parallel Transport frame and pre-calculates curvature derivatives."""
+        s_eval = np.linspace(0, self.total_length, num_points)
+        ds = s_eval[1] - s_eval[0]
         
-        # Gates (3D)
-        gate_dists = np.linalg.norm(current_obs["gates_pos"] - drone_pos, axis=1)
-        gate_alert = np.any(gate_dists < self.REPLAN_RADIUS)
+        # Initialize dictionary to hold arrays
+        frames = {
+            "s": s_eval, 
+            "pos": [], "t": [], "n1": [], "n2": [], 
+            "k1": [], "k2": [], 
+            "dk1": [], "dk2": []
+        }
+
+        # Initial Frame Setup [cite: 310-313]
+        t0 = self.spline(0, 1)
+        t0 /= np.linalg.norm(t0)
+        g_vec = np.array([0, 0, -1]) 
         
-        # Obstacles (2D)
-        obs_dists = np.linalg.norm(current_obs["obstacles_pos"][:, :2] - drone_pos[:2], axis=1)
-        obs_alert = np.any(obs_dists < self.REPLAN_RADIUS)
+        # Handle case where start is vertical
+        if np.linalg.norm(np.cross(t0, g_vec)) < 1e-3:
+            n2_0 = np.cross(t0, np.array([1, 0, 0]))
+        else:
+            # Project gravity to find normal
+            n2_0 = g_vec - np.dot(g_vec, t0) * t0
+        n2_0 /= np.linalg.norm(n2_0)
+        n1_0 = np.cross(n2_0, t0)
 
-        return gate_newly_hit or obstacle_newly_hit or gate_alert or obs_alert
+        curr_t, curr_n1, curr_n2 = t0, n1_0, n2_0
 
-    def __regenerate_flight_plan(self, current_obs, elapsed_time):
-        """Replans trajectory based on new observations."""
-        self.__gate_positions = current_obs["gates_pos"]
-        self.__gate_normals, self.__gate_y_axes, self.__gate_z_axes = self.__extract_gate_frames(
-            current_obs["gates_quat"]
-        )
+        # Pass 1: Integrate Frame and Calculate Curvature (k1, k2)
+        k1_list = []
+        k2_list = []
 
-        path_points = self.__generate_gate_approach_points(
-            self.__start_position, self.__gate_positions, self.__gate_normals
-        )
-        path_points = self.__add_detour_logic(
-            path_points, self.__gate_positions, self.__gate_normals,
-            self.__gate_y_axes, self.__gate_z_axes
-        )
-        time_knots, path_points = self.__insert_obstacle_avoidance_points(
-            path_points, current_obs["obstacles_pos"], self.OBSTACLE_CLEARANCE
-        )
-        self.__trajectory_spline = self.__compute_trajectory_spline(
-            self.FLIGHT_DURATION, path_points, custom_time_knots=time_knots
-        )
+        for i, s in enumerate(s_eval):
+            pos = self.spline(s)
+            
+            # Curvature vector (k * n) is the second derivative of position wrt s
+            k_vec = self.spline(s, 2)
+            
+            # Project curvature onto normals [cite: 211-218]
+            k1 = np.dot(k_vec, curr_n1) # Sign convention depends on definition, usually k = dT/ds
+            k2 = np.dot(k_vec, curr_n2)
 
-    def __determine_detour_direction(self, v_proj, v_proj_norm, y_axis, z_axis):
-        if v_proj_norm < 1e-6:
-            return y_axis, "right", 0.0
-        
-        v_proj_y = np.dot(v_proj, y_axis)
-        v_proj_z = np.dot(v_proj, z_axis)
-        angle_deg = np.arctan2(v_proj_z, v_proj_y) * 180 / np.pi
-
-        if -90 <= angle_deg < 45: return y_axis, "right", angle_deg
-        elif 45 <= angle_deg < 135: return z_axis, "top", angle_deg
-        else: return -y_axis, "left", angle_deg
-
-    def __add_detour_logic(self, path_points, g_pos, g_norm, g_y, g_z, num_pts=5, angle_deg=120.0, rad=0.65):
-        num_gates = g_pos.shape[0]
-        pts_list = list(path_points)
-        inserts = 0
-
-        for i in range(num_gates - 1):
-            last_idx = 1 + (i + 1) * num_pts - 1 + inserts
-            first_idx_next = 1 + (i + 1) * num_pts + inserts
-
-            p1 = pts_list[last_idx]
-            p2 = pts_list[first_idx_next]
-            vec = p2 - p1
-            norm = np.linalg.norm(vec)
-
-            if norm < 1e-6: continue
-
-            cos_a = np.dot(vec, g_norm[i]) / norm
-            if np.arccos(np.clip(cos_a, -1, 1)) * 180 / np.pi > angle_deg:
-                v_proj = vec - np.dot(vec, g_norm[i]) * g_norm[i]
-                detour_vec, _, _ = self.__determine_detour_direction(v_proj, np.linalg.norm(v_proj), g_y[i], g_z[i])
+            # Store
+            frames["pos"].append(pos); frames["t"].append(curr_t)
+            frames["n1"].append(curr_n1); frames["n2"].append(curr_n2)
+            k1_list.append(k1); k2_list.append(k2)
+            
+            # Propagate Frame using Parallel Transport [cite: 213]
+            # dT/ds = k1*n1 + k2*n2
+            # dN1/ds = -k1*T
+            # dN2/ds = -k2*T
+            
+            if i < len(s_eval) - 1:
+                # Next tangent
+                next_t = self.spline(s_eval[i+1], 1)
+                next_t /= np.linalg.norm(next_t)
                 
-                detour_pt = g_pos[i] + rad * detour_vec
-                pts_list.insert(last_idx + 1, detour_pt)
-                inserts += 1
+                # Approximate integration for normals (small angle approximation)
+                # This keeps n1 perpendicular to t without inducing twist
+                axis = np.cross(curr_t, next_t)
+                angle = np.arccos(np.clip(np.dot(curr_t, next_t), -1.0, 1.0))
+                
+                if np.linalg.norm(axis) > 1e-6:
+                    axis /= np.linalg.norm(axis)
+                    r_vec = R.from_rotvec(axis * angle)
+                    next_n1 = r_vec.apply(curr_n1)
+                    next_n2 = r_vec.apply(curr_n2)
+                else:
+                    next_n1 = curr_n1
+                    next_n2 = curr_n2
+                
+                curr_t, curr_n1, curr_n2 = next_t, next_n1, next_n2
 
-        return np.array(pts_list)
+        frames["k1"] = np.array(k1_list)
+        frames["k2"] = np.array(k2_list)
 
-    # ==========================================================================
-    # CORE CONTROL FUNCTION (Merges Planner + MPC)
-    # ==========================================================================
+        # Pass 2: Calculate Derivatives of Curvature (dk1, dk2)
+        # We need these for the term h_dot in the dynamics 
+        frames["dk1"] = np.gradient(frames["k1"], ds)
+        frames["dk2"] = np.gradient(frames["k2"], ds)
 
-    def compute_control(self, obs: dict[str, NDArray[np.floating]], info: dict | None = None) -> NDArray[np.floating]:
-        """
-        1. Checks for replanning triggers.
-        2. Samples the spline for the MPC horizon.
-        3. Solves the OCP.
-        """
-        current_time = min(self.__current_step * self._dt, self.FLIGHT_DURATION)
+        for k in frames: 
+            if isinstance(frames[k], list):
+                frames[k] = np.array(frames[k])
+                
+        return frames
+
+    def get_frame(self, s_query):
+        """Looks up pre-calculated frame data for a given s."""
+        idx = np.searchsorted(self.pt_frame['s'], s_query) - 1
+        idx = np.clip(idx, 0, len(self.pt_frame['s'])-1)
+        return {k: self.pt_frame[k][idx] for k in self.pt_frame if k != 's'}
+
+    def get_closest_s(self, pos_query, s_guess=0.0, window=5.0):
+        """Finds s* [cite: 239] locally around s_guess."""
+        mask = (self.pt_frame['s'] >= s_guess - 1.0) & (self.pt_frame['s'] <= s_guess + window)
         
-        if self.__current_step >= int(self.FLIGHT_DURATION * self.__control_freq):
-            self._finished = True
+        if not np.any(mask):
+            candidates_pos = self.pt_frame['pos']
+            candidates_s = self.pt_frame['s']
+        else:
+            candidates_pos = self.pt_frame['pos'][mask]
+            candidates_s = self.pt_frame['s'][mask]
 
-        # --- 1. Replanning Logic ---
-        if self.__check_for_env_update(obs):
-            # This updates self.__trajectory_spline
-            self.__regenerate_flight_plan(obs, current_time)
+        dists = np.linalg.norm(candidates_pos - pos_query, axis=1)
+        idx_min = np.argmin(dists)
+        return candidates_s[idx_min]
 
-        # --- 2. Prepare MPC State (x0) ---
+# ==============================================================================
+# 3. ACADOS SOLVER SETUP
+# ==============================================================================
+
+class SpatialMPC:
+    def __init__(self, params, N=20, Tf=1.0):
+        self.N = N
+        self.Tf = Tf
+        params['g'] = params['gravity_vec'][2]  # Ensure g is consistent
+        self.params = params
+        
+        # Clean compile directory
+        if os.path.exists('c_generated_code'): 
+            try: shutil.rmtree('c_generated_code')
+            except: pass
+        
+        self.solver = self._build_solver()
+
+    def _build_solver(self):
+        model = export_model(self.params)
+        ocp = AcadosOcp()
+        ocp.model = model
+        ocp.dims.N = self.N
+        ocp.solver_options.tf = self.Tf
+
+        # --- DIMENSIONS ---
+        nx = 12 
+        nu = 4
+        ny = nx + nu
+        ny_e = nx
+
+        # --- COST CONFIGURATION ---
+        # Weights: s, w1, w2, ds, dw1, dw2, phi, th, psi, dphi, dth, dpsi
+        # High penalty on w1/w2 (corridor). 
+        # Low penalty on s (we drive s via reference).
+        q_diag = np.array([
+            0.0, 20.0, 20.0,    # Pos
+            10.0, 5.0,  5.0,    # Vel
+            1.0,  1.0,  1.0,    # Att
+            0.1,  0.1,  0.1     # Rate
+        ])
+        
+        r_diag = np.array([5.0, 5.0, 5.0, 0.1]) # Input weights
+
+        ocp.cost.W = scipy.linalg.block_diag(np.diag(q_diag), np.diag(r_diag))
+        ocp.cost.W_e = np.diag(q_diag)
+        
+        ocp.cost.Vx = np.zeros((ny, nx)); ocp.cost.Vx[:nx, :nx] = np.eye(nx)
+        ocp.cost.Vu = np.zeros((ny, nu)); ocp.cost.Vu[nx:, :] = np.eye(nu)
+        ocp.cost.Vx_e = np.eye(nx)
+        
+        ocp.cost.yref = np.zeros(ny)
+        ocp.cost.yref_e = np.zeros(ny_e)
+
+        # --- CONSTRAINTS ---
+        # Hard Inputs
+        ocp.constraints.idxbu = np.array([0, 1, 2, 3])
+        ocp.constraints.lbu = np.array([-0.8, -0.8, -0.8, self.params['thrust_min']])
+        ocp.constraints.ubu = np.array([+0.8, +0.8, +0.8, self.params['thrust_max']])
+        
+        # Soft State Bounds (Corridor) [cite: 305]
+        # w1, w2 indices in x are 1 and 2
+        ocp.constraints.idxbx = np.array([1, 2])
+        ocp.constraints.lbx = np.array([-0.5, -0.5]) 
+        ocp.constraints.ubx = np.array([+0.5, +0.5])
+        
+        # Slack Config
+        ns = 2
+        ocp.constraints.idxsbx = np.array([0, 1]) # Slack on 0th and 1st element of idxbx
+        
+        BIG_COST = 1000.0
+        ocp.cost.zl = BIG_COST * np.ones(ns)
+        ocp.cost.zu = BIG_COST * np.ones(ns)
+        ocp.cost.Zl = BIG_COST * np.ones(ns)
+        ocp.cost.Zu = BIG_COST * np.ones(ns)
+
+        ocp.constraints.x0 = np.zeros(nx)
+
+        # --- OPTIONS ---
+        ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
+        ocp.solver_options.hessian_approx = 'GAUSS_NEWTON'
+        ocp.solver_options.integrator_type = 'ERK'
+        ocp.solver_options.nlp_solver_type = 'SQP_RTI'
+        ocp.solver_options.qp_solver_cond_N = self.N
+        ocp.solver_options.qp_solver_tol_stat = 1e-4
+
+        # --- PARAMETERS ---
+        # Initialize P (size 13)
+        # [t(3), n1(3), n2(3), k1, k2, dk1, dk2]
+        p0 = np.concatenate([
+            [1,0,0], [0,1,0], [0,0,1], 
+            [0,0], [0,0]
+        ])
+        ocp.parameter_values = p0
+
+        return AcadosOcpSolver(ocp, json_file='acados_spatial.json')
+
+# ==============================================================================
+# 4. CONTROLLER CLASS
+# ==============================================================================
+
+class SpatialMPCController(Controller):
+    def __init__(self, obs: dict, info: dict, config: dict):
+        # 1. Setup
+        self.params = get_drone_params()
+        self.v_target = 4.0 # Target speed (aggressive)
+        
+        # 2. Geometry
+        gates_list = config.get("env", {}).get("track", {}).get("gates", [])
+        if not gates_list and "gates" in info:
+            gates_list = info["gates"]
+            
+        gates_pos = [g["pos"] for g in gates_list]
+        start_pos = obs["pos"]
+        
+        self.geo = GeometryEngine(gates_pos, start_pos)
+        
+        # 3. Solver
+        self.N_horizon = 20
+        self.mpc = SpatialMPC(self.params, N=self.N_horizon, Tf=1.0)
+        
+        # 4. State
+        self.prev_s = 0.0
+        self.episode_start_time = datetime.now()
+        self.step_count = 0
+        self.control_log = {k: [] for k in ['timestamps', 'phi_c', 'theta_c', 'psi_c', 'thrust_c', 'solver_status', 's', 'w1', 'w2', 'ds']}
+        self.debug = True
+
+        self.reset_mpc_solver()
+
+    def reset_mpc_solver(self):
+        """Warm starts the solver with a forward guess."""
+        nx = 12
+        hover_T = self.params['mass'] * self.params['g']
+        
+        for k in range(self.N_horizon + 1):
+            x_guess = np.zeros(nx)
+            # Guess forward progress
+            x_guess[0] = self.v_target * k * (self.mpc.Tf / self.N_horizon)
+            x_guess[3] = self.v_target # Target velocity
+            
+            self.mpc.solver.set(k, "x", x_guess)
+            if k < self.N_horizon:
+                self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
+        
+        self.prev_s = 0.0
+
+    def compute_control(self, obs: dict, info: dict | None = None) -> np.ndarray:
+        
+        # Derived states
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
-        x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
         
-        # Constrain initial state for solver
-        self._acados_ocp_solver.set(0, "lbx", x0)
-        self._acados_ocp_solver.set(0, "ubx", x0)
+        hover_T = self.params['mass'] * self.params['g']
+        
+        # 1. State Feedback (World -> Spatial) [cite: 239-245]
+        x_spatial = self._cartesian_to_spatial(obs["pos"], obs["vel"], obs["rpy"], obs["drpy"])
+        
+        # Update current state constraint (x0)
+        self.mpc.solver.set(0, "lbx", x_spatial)
+        self.mpc.solver.set(0, "ubx", x_spatial)
+        
+        # 2. Horizon Updates
+        curr_s = x_spatial[0]
+        curr_ds = x_spatial[3]
+        dt = self.mpc.Tf / self.mpc.N
+        
+        # "Carrot" approach: Set target velocity high [cite: 586]
+        target_vel = self.v_target 
 
-        # --- 3. Generate Horizon References from Spline ---
-        # Generate time steps for the prediction horizon: [t, t+dt, t+2dt, ..., t+N*dt]
-        horizon_times = np.linspace(current_time, current_time + self._T_HORIZON, self.MPC_HORIZON_STEPS)
-        
-        # Clamp times to flight duration (spline is only defined up to FLIGHT_DURATION)
-        horizon_times = np.clip(horizon_times, 0, self.FLIGHT_DURATION)
-
-        # Sample Position and Velocity from the Spline
-        ref_pos_horizon = self.__trajectory_spline(horizon_times)       # (N, 3)
-        ref_vel_horizon = self.__trajectory_spline(horizon_times, nu=1) # (N, 3)
-        
-        # Set References in Solver
-        for k in range(self.MPC_HORIZON_STEPS):
-            yref = np.zeros(self._ny)
+        for k in range(self.mpc.N):
+            # A. Predict s for parameter lookup
+            s_pred = curr_s + k * max(curr_ds, 1.0) * dt # Use max to prevent stagnation lookups
             
-            # Position Reference
-            yref[0:3] = ref_pos_horizon[k]
+            # B. Set Parameters P [cite: 213]
+            f = self.geo.get_frame(s_pred)
+            # P = [t(3), n1(3), n2(3), k1, k2, dk1, dk2]
+            p_k = np.concatenate([
+                f['t'], f['n1'], f['n2'], 
+                [f['k1']], [f['k2']], 
+                [f['dk1']], [f['dk2']]
+            ])
+            self.mpc.solver.set(k, "p", p_k)
             
-            # Orientation Reference (Roll, Pitch, Yaw)
-            # Roll/Pitch = 0. Yaw = 0 (Can be improved to face velocity vector)
-            yref[3:6] = np.zeros(3) 
-
-            # Velocity Reference
-            yref[6:9] = ref_vel_horizon[k]
+            # C. Set Reference yref [cite: 558]
+            # Drive s forward aggressively
+            s_ref = curr_s + (k + 1) * target_vel * dt
             
-            # Angular Rate Reference (0)
-            yref[9:12] = np.zeros(3)
+            y_ref = np.zeros(16)
+            y_ref[0] = s_ref        # Target progress
+            y_ref[3] = target_vel   # Target speed
+            y_ref[15] = hover_T     # Feedforward thrust
             
-            # Input Reference (Hover Thrust)
-            yref[15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+            self.mpc.solver.set(k, "yref", y_ref)
 
-            self._acados_ocp_solver.set(k, "yref", yref)
-
-        # --- 4. Final Step Reference (Terminal Cost) ---
-        # Sample terminal point
-        t_final = min(current_time + self._T_HORIZON, self.FLIGHT_DURATION)
-        ref_pos_final = self.__trajectory_spline(t_final)
-        ref_vel_final = self.__trajectory_spline(t_final, nu=1)
-
-        yref_e = np.zeros(self._ny_e)
-        yref_e[0:3] = ref_pos_final
-        yref_e[6:9] = ref_vel_final
-        self._acados_ocp_solver.set(self.MPC_HORIZON_STEPS, "y_ref", yref_e)
-
-        # --- 5. Solve ---
-        status = self._acados_ocp_solver.solve()
+        # 3. Terminal Node Update
+        s_end = curr_s + self.mpc.N * target_vel * dt
+        f_end = self.geo.get_frame(s_end)
+        p_end = np.concatenate([
+             f_end['t'], f_end['n1'], f_end['n2'], 
+             [f_end['k1']], [f_end['k2']], 
+             [f_end['dk1']], [f_end['dk2']]
+        ])
+        self.mpc.solver.set(self.mpc.N, "p", p_end)
         
-        # Check status if needed (0 = success)
-        # if status != 0: print(f"Acados returned status {status}")
+        yref_e = np.zeros(12)
+        yref_e[0] = s_end
+        yref_e[3] = target_vel
+        self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
-        # Get control input
-        u0 = self._acados_ocp_solver.get(0, "u")
+        # 4. Solve
+        status = self.mpc.solver.solve()
         
-        # Visualization (Optional)
-        try:
-            draw_line(
-                self.env,
-                self.__trajectory_spline(self.__trajectory_spline.x),
-                rgba=np.array([1.0, 1.0, 1.0, 0.2]),
-            )
-        except (AttributeError, TypeError):
-            pass
+        if status != 0:
+            print(f"MPC Warning: Solver status {status}")
+            # Fallback to hover if failed
+            u_opt = np.array([0.0, 0.0, 0.0, hover_T])
+        else:
+            u_opt = self.mpc.solver.get(0, "u")
+            
+        # Log
+        self._log_control_step(x_spatial, u_opt, status)
 
-        return u0
+        # Return [roll, pitch, yaw, thrust]
+        return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
 
-    def step_callback(self, action, obs, reward, terminated, truncated, info) -> bool:
-        self.__current_step += 1
-        return self._finished
+    def _cartesian_to_spatial(self, pos, vel, rpy, drpy):
+        """Projects global state onto the path frame [cite: 282-284]."""
+        # 1. Find s
+        s = self.geo.get_closest_s(pos, s_guess=self.prev_s)
+        self.prev_s = s 
+        
+        # 2. Get Frame
+        f = self.geo.get_frame(s)
+        
+        # 3. Calculate Errors (w1, w2)
+        r_vec = pos - f['pos']
+        w1 = np.dot(r_vec, f['n1'])
+        w2 = np.dot(r_vec, f['n2'])
+        
+        # 4. Scaling Factor h
+        h = 1 - f['k1'] * w1 - f['k2'] * w2
+        # Safety clamp to avoid division by zero in tight loops
+        h = max(h, 0.1) 
+        
+        # 5. Calculate Spatial Velocities
+        ds = np.dot(vel, f['t']) / h
+        dw1 = np.dot(vel, f['n1'])
+        dw2 = np.dot(vel, f['n2'])
+        
+        return np.array([s, w1, w2, ds, dw1, dw2, rpy[0], rpy[1], rpy[2], drpy[0], drpy[1], drpy[2]])
+
+    def reset(self):
+        """Reset internal variables."""
+        self.prev_s = 0.0
+        self.reset_mpc_solver()
+
+    def episode_reset(self):
+        """Reset the controller's internal state and models."""
+        self.reset()
+
+    def step_callback(self, action, obs, reward, terminated, truncated, info):
+        """Called at each environment step. Returns False to keep running."""
+        return False
 
     def episode_callback(self):
-        self.__current_step = 0
-        self._acados_ocp_solver.reset()
+        """Called at the end of each episode. Generate plots here."""
+        if len(self.control_log['timestamps']) > 0:
+            self.plot_all_diagnostics()
+        return
+
+    def _log_control_step(self, x_spatial: np.ndarray, u_opt: np.ndarray, solver_status: int):
+        """Log control values and state for debugging."""
+        self.step_count += 1
+        elapsed_time = (datetime.now() - self.episode_start_time).total_seconds()
+        
+        # Log data
+        self.control_log['timestamps'].append(elapsed_time)
+        self.control_log['phi_c'].append(float(u_opt[0]))
+        self.control_log['theta_c'].append(float(u_opt[1]))
+        self.control_log['psi_c'].append(float(u_opt[2]))
+        self.control_log['thrust_c'].append(float(u_opt[3]))
+        self.control_log['solver_status'].append(int(solver_status))
+        self.control_log['s'].append(float(x_spatial[0]))
+        self.control_log['w1'].append(float(x_spatial[1]))
+        self.control_log['w2'].append(float(x_spatial[2]))
+        self.control_log['ds'].append(float(x_spatial[3]))
+        
+        # Console print
+        if self.debug:
+            print(f"[Step {self.step_count}] t={elapsed_time:.3f}s | "
+                  f"φ_c={u_opt[0]:+.4f} θ_c={u_opt[1]:+.4f} ψ_c={u_opt[2]:+.4f} T_c={u_opt[3]:.4f} | "
+                  f"s={x_spatial[0]:.2f} w1={x_spatial[1]:+.4f} w2={x_spatial[2]:+.4f} ds={x_spatial[3]:.3f} | "
+                  f"Status={solver_status}")
+
+    def save_control_log(self, filepath: str = None):
+        """Save control log to JSON file."""
+        if filepath is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            filepath = f"control_log_{timestamp}.json"
+        
+        with open(filepath, 'w') as f:
+            json.dump(self.control_log, f, indent=2)
+        
+        if self.debug:
+            print(f"\nControl log saved to: {filepath}")
+        return filepath
+
+    def plot_control_values(self, figsize=(16, 10), save_path: str = None):
+        """Plot control values over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No control data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        
+        fig, axes = plt.subplots(3, 2, figsize=figsize)
+        fig.suptitle('MPC Control Values & State Feedback', fontsize=16, fontweight='bold')
+        
+        # Row 1: Attitude Commands
+        ax = axes[0, 0]
+        ax.plot(t, self.control_log['phi_c'], 'b-', linewidth=2, label='φ_c (Roll)')
+        ax.set_ylabel('Roll Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[0, 1]
+        ax.plot(t, self.control_log['theta_c'], 'g-', linewidth=2, label='θ_c (Pitch)')
+        ax.set_ylabel('Pitch Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 2: Thrust & Yaw
+        ax = axes[1, 0]
+        ax.plot(t, self.control_log['thrust_c'], 'r-', linewidth=2, label='T_c (Thrust)')
+        ax.axhline(y=self.params['mass'] * self.params['g'], color='k', linestyle='--', 
+                   label='Hover Thrust', alpha=0.5)
+        ax.set_ylabel('Thrust Command (N)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[1, 1]
+        ax.plot(t, self.control_log['psi_c'], 'm-', linewidth=2, label='ψ_c (Yaw)')
+        ax.set_ylabel('Yaw Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 3: Path-following state
+        ax = axes[2, 0]
+        ax.plot(t, self.control_log['s'], 'c-', linewidth=2, label='s (Arc length)')
+        ax.set_ylabel('Arc Length (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[2, 1]
+        ax.plot(t, self.control_log['w1'], 'orange', linewidth=2, label='w1 (Lateral)')
+        ax.plot(t, self.control_log['w2'], 'purple', linewidth=2, label='w2 (Vertical)')
+        ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='Bounds')
+        ax.axhline(y=-0.5, color='r', linestyle='--', alpha=0.5)
+        ax.set_ylabel('Lateral/Vertical Error (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"control_plot_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Control plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+
+    def plot_solver_status(self, save_path: str = None):
+        """Plot solver status over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        status = np.array(self.control_log['solver_status'])
+        fig, ax = plt.subplots(figsize=(12, 4))
+        
+        # Color code: green=0 (success), red=non-zero (failure)
+        colors = ['green' if s == 0 else 'red' for s in status]
+        ax.scatter(t, status, c=colors, s=50, alpha=0.6, edgecolors='black')
+        
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.set_ylabel('Solver Status', fontweight='bold')
+        ax.set_title('MPC Solver Status Over Time (Green=Success, Red=Failure)', 
+                     fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.5, max(status) + 1)
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"solver_status_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Solver status plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+
+    def plot_all_diagnostics(self, save_dir: str = None):
+        """Generate all diagnostic plots at once."""
+        if save_dir is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_dir = f"mpc_diagnostics_{timestamp}"
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        log_file = self.save_control_log(os.path.join(save_dir, "control_log.json"))
+        control_plot = self.plot_control_values(save_path=os.path.join(save_dir, "control_values.png"))
+        status_plot = self.plot_solver_status(save_path=os.path.join(save_dir, "solver_status.png"))
+        
+        if self.debug:
+            print(f"\n{'='*60}")
+            print(f"All diagnostics saved to: {save_dir}")
+            print(f"  - {log_file}")
+            print(f"  - {control_plot}")
+            print(f"  - {status_plot}")
+            print(f"{'='*60}")
+        
+        return save_dir

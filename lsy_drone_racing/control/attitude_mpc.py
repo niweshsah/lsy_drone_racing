@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
     
-    X_dot, X, U, _ = symbolic_dynamics_euler(
+    X_dot, X, U, Y = symbolic_dynamics_euler(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
         J=parameters["J"],
@@ -65,6 +65,7 @@ def create_ocp_solver(
 
     # Get Dimensions
     nx = ocp.model.x.rows() # number of states
+    # nx  = 12
     nu = ocp.model.u.rows() # Number of inputs (4: cmd_rpy, thrust)
     ny = nx + nu  # Size of cost vector for intermediate steps
     ny_e = nx  # Size of cost vector for the final step (no input)
@@ -255,7 +256,9 @@ class AttitudeMPC(Controller):
         
         # set model dimension size for run-time use
         self._nx = self._ocp.model.x.rows()
+        # nx = 12
         self._nu = self._ocp.model.u.rows()
+        
         self._ny = self._nx + self._nu
         self._ny_e = self._nx
 
@@ -311,7 +314,7 @@ class AttitudeMPC(Controller):
         
         # zero roll, pitch
         # no roll or pitch tracking
-        yref[:, 5] = self._waypoints_yaw[i : i + self._N]  # yaw
+        yref[:, 5] = self._waypoints_yaw[i : i + self._N]  # yaw; This is all set to zero
         
         # velocity tracking
         yref[:, 6:9] = self._waypoints_vel[i : i + self._N]  # velocity
