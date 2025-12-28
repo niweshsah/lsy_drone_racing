@@ -20,4 +20,4 @@ c_generated_code*
 ros_ws/
 acados/
 
-# mpc_diagnostics*
+mpc_diagnostics*
