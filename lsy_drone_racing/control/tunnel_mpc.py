@@ -451,22 +451,37 @@ class SpatialMPCController(Controller):
 
         self.reset_mpc_solver()
 
+    # def reset_mpc_solver(self):
+    #     """Warm starts the solver with a forward guess."""
+    #     nx = 12
+    #     hover_T = self.params['mass'] * self.params['g']
+        
+    #     for k in range(self.N_horizon + 1):
+    #         x_guess = np.zeros(nx)
+    #         # Guess forward progress
+    #         x_guess[0] = self.v_target * k * (self.mpc.Tf / self.N_horizon)
+    #         x_guess[3] = self.v_target # Target velocity
+            
+    #         self.mpc.solver.set(k, "x", x_guess)
+    #         if k < self.N_horizon:
+    #             self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
+        
+    #     self.prev_s = 0.0
+        
     def reset_mpc_solver(self):
-        """Warm starts the solver with a forward guess."""
         nx = 12
-        hover_T = self.params['mass'] * self.params['g']
+        hover_T = self.params['mass'] * self.params['g'] / self.params['cmd_f_coef'] # Inverse calc for hover input
         
         for k in range(self.N_horizon + 1):
             x_guess = np.zeros(nx)
-            # Guess forward progress
-            x_guess[0] = self.v_target * k * (self.mpc.Tf / self.N_horizon)
-            x_guess[3] = self.v_target # Target velocity
+            # Linear ramp from 0 to v_target
+            vel_k = self.v_target * (k / self.N_horizon) 
+            x_guess[3] = vel_k 
+            x_guess[0] = vel_k * k * (self.mpc.Tf / self.N_horizon) * 0.5 # 1/2 a*t^2 approx
             
             self.mpc.solver.set(k, "x", x_guess)
             if k < self.N_horizon:
                 self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
-        
-        self.prev_s = 0.0
 
     def compute_control(self, obs: dict, info: dict | None = None) -> np.ndarray:
         
