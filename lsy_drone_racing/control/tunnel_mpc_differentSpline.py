@@ -477,7 +477,7 @@ class SpatialMPCController(Controller):
     def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 1.0 # Target speed (aggressive)
+        self.v_target = 0.45 # Target speed
         
         self.env = env
         
@@ -638,6 +638,31 @@ class SpatialMPCController(Controller):
         # 4. Solve
         status = self.mpc.solver.solve()
         
+        # --- VISUALIZATION: MPC PREDICTED HORIZON (Blue) ---
+        # We extract the trajectory regardless of status to see what the solver "tried" to do
+        if self.env is not None:
+            try:
+                mpc_points_cartesian = []
+                for k in range(self.mpc.N + 1):
+                    # Get predicted spatial state
+                    x_k = self.mpc.solver.get(k, "x")
+                    s_k, w1_k, w2_k = x_k[0], x_k[1], x_k[2]
+                    
+                    # Convert Spatial (s, w1, w2) -> Cartesian (x, y, z)
+                    pos_k = self._spatial_to_cartesian(s_k, w1_k, w2_k)
+                    mpc_points_cartesian.append(pos_k)
+                
+                # Draw Blue Line (R=0, G=0, B=1, Alpha=0.8)
+                draw_line(
+                    env=self.env,
+                    points=np.array(mpc_points_cartesian),
+                    rgba=np.array([0.0, 0.0, 1.0, 0.8]), 
+                    min_size=4.0, max_size=4.0 # Slightly thicker than ref path
+                )
+            except Exception as e:
+                if self.debug:
+                    print(f"MPC Horizon Vis Error: {e}")
+        
         if status != 0:
             print(f"MPC Warning: Solver status {status}")
             # Fallback to hover if failed
@@ -652,6 +677,15 @@ class SpatialMPCController(Controller):
 
         # Return [roll, pitch, yaw, thrust]
         return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
+    
+    def _spatial_to_cartesian(self, s, w1, w2):
+        """Reconstructs global position from spatial coordinates."""
+        # 1. Get reference frame at specific s
+        f = self.geo.get_frame(s)
+        
+        # 2. Reconstruct position: center_pos + lateral_offset * n1 + vertical_offset * n2
+        pos_world = f['pos'] + w1 * f['n1'] + w2 * f['n2']
+        return pos_world
 
     def _cartesian_to_spatial(self, pos, vel, rpy, drpy):
         """Projects global state onto the path frame [cite: 282-284]."""
