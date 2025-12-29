@@ -294,9 +294,9 @@ class GeometryEngine:
             pos = self.spline(s)
             
             # Curvature vector (k * n) is the second derivative of position wrt s
-            k_vec = self.spline(s, 2)
+            k_vec = self.spline(s, 2) # 2nd derivative of path is curvature vector
             
-            # Project curvature onto normals [cite: 211-218]
+            # Project curvature onto normals
             k1 = np.dot(k_vec, curr_n1) # Sign convention depends on definition, usually k = dT/ds
             k2 = np.dot(k_vec, curr_n2)
 
@@ -371,7 +371,7 @@ class GeometryEngine:
 # ==============================================================================
 
 class SpatialMPC:
-    def __init__(self, params, N=20, Tf=1.0):
+    def __init__(self, params, N=50, Tf=1.0):
         self.N = N
         self.Tf = Tf
         params['g'] = params['gravity_vec'][2]  # Ensure g is consistent
@@ -402,7 +402,7 @@ class SpatialMPC:
         # High penalty on w1/w2 (corridor). 
         # Low penalty on s (we drive s via reference).
         q_diag = np.array([
-            10.0, 20.0, 20.0,    # Pos
+            1.0, 20.0, 20.0,    # Pos
             10.0, 5.0,  5.0,    # Vel
             1.0,  1.0,  1.0,    # Att
             0.1,  0.1,  0.1     # Rate
@@ -432,11 +432,11 @@ class SpatialMPC:
         ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, self.params['thrust_min'] * 4] )
         ocp.constraints.ubu = np.array([+0.5, +0.5, +0.5, self.params['thrust_max'] * 4])
         
-        # Soft State Bounds (Corridor) [cite: 305]
+        # Soft State Bounds (Corridor)
         # w1, w2 indices in x are 1 and 2
         ocp.constraints.idxbx = np.array([1, 2 , 6 , 7 , 8])  # w1, w2, phi, theta, psi
-        ocp.constraints.lbx = np.array([-0.3, -0.3 , -0.5, -0.5, -0.5]) 
-        ocp.constraints.ubx = np.array([+0.3, +0.3, +0.5, +0.5, +0.5])
+        ocp.constraints.lbx = np.array([-0.2, -0.2 , -0.5, -0.5, -0.5]) 
+        ocp.constraints.ubx = np.array([+0.2, +0.2, +0.5, +0.5, +0.5])
         
         # Slack Config
         ns = 2
@@ -477,7 +477,7 @@ class SpatialMPCController(Controller):
     def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 0.45 # Target speed
+        self.v_target = 1.5 # Target speed
         
         self.env = env
         
@@ -495,7 +495,7 @@ class SpatialMPCController(Controller):
         self.geo = GeometryEngine(gates_pos, gates_normals , start_pos)
         
         # 3. Solver
-        self.N_horizon = 20
+        self.N_horizon = 50
         self.mpc = SpatialMPC(self.params, N=self.N_horizon, Tf=1.0)
         
         # 4. State
@@ -585,13 +585,44 @@ class SpatialMPCController(Controller):
         # --- VISUALIZATION END ---
 
 
+        # Initialize a running reference s starting from current position
+        running_s_ref = curr_s
+        
+        # Max lateral accel (tuning parameter): 
+        # 9.8 * tan(30 deg) ~= 5.7
+        # 9.8 * tan(45 deg) ~= 9.8
+        max_lat_acc = 1.5 
+        epsilon = 0.01 # Avoid div by zero
+
         for k in range(self.mpc.N):
-            # A. Predict s for parameter lookup
-            s_pred = curr_s + k * max(curr_ds, 1.0) * dt # Use max to prevent stagnation lookups
+            # A. Predict s for parameter lookup (Dynamics Linearization point)
+            # We still use the solver's 'current' predicted speed for the parameter lookup point
+            s_pred = curr_s + k * max(curr_ds, 1.0) * dt 
             
-            # B. Set Parameters P [cite: 213]
+            # B. Get Frame & Curvature
             f = self.geo.get_frame(s_pred)
-            # P = [t(3), n1(3), n2(3), k1, k2, dk1, dk2]
+            
+            # Calculate Total Curvature magnitude
+            k_mag = np.sqrt(f['k1']**2 + f['k2']**2)
+            
+            # C. Compute Dynamic Speed Limit
+            # "Physics-based" cornering speed
+            v_corner = np.sqrt(max_lat_acc / (k_mag + epsilon))
+            
+            # The reference speed for this step is the min of target and cornering limit
+            # v_ref_k = target_vel
+            
+            # if k_mag >= 1:
+            #     v_ref_k = v_corner
+                
+            v_ref_k = min(v_corner, target_vel)
+        
+            # print(f"Step {k}, s_pred: {s_pred:.2f}, k_mag: {k_mag:.3f}, v_corner: {v_corner:.3f}, v_ref_k: {v_ref_k:.3f}")
+            
+            # D. Integrate s_ref forward
+            running_s_ref += v_ref_k * dt
+
+            # E. Set Parameters P (Model Dynamics)
             p_k = np.concatenate([
                 f['t'], f['n1'], f['n2'], 
                 [f['k1']], [f['k2']], 
@@ -599,20 +630,20 @@ class SpatialMPCController(Controller):
             ])
             self.mpc.solver.set(k, "p", p_k)
             
-            # C. Set Reference yref
-            # Drive s forward aggressively
-            s_ref = curr_s + (k + 1) * target_vel * dt
-            
+            # F. Set Reference yref (Cost Target)
+            # We tell the cost function: "Be at this accumulated s, moving at this limited v"
             y_ref = np.zeros(16)
-            y_ref[0] = s_ref        # Target progress
-            y_ref[3] = target_vel   # Target speed
-            # y_ref[3] = 0   # just hold zero speed for debugging
-            y_ref[15] = hover_T     # Feedforward thrust
+            y_ref[0] = running_s_ref    # Dynamic s target
+            y_ref[3] = v_ref_k          # Dynamic v target
+            y_ref[15] = hover_T         # Feedforward thrust
             
             self.mpc.solver.set(k, "yref", y_ref)
 
         # 3. Terminal Node Update
-        s_end = curr_s + self.mpc.N * target_vel * dt
+        # Continue the integration for one last step to get terminal s
+        # (Re-use the last calculated curvature speed v_ref_k)
+        s_end = running_s_ref + v_ref_k * dt 
+        
         f_end = self.geo.get_frame(s_end)
         p_end = np.concatenate([
              f_end['t'], f_end['n1'], f_end['n2'], 
@@ -621,18 +652,14 @@ class SpatialMPCController(Controller):
         ])
         self.mpc.solver.set(self.mpc.N, "p", p_end)
         
+        v_corner = np.sqrt(max_lat_acc / (k_mag + epsilon))
+        
+        print(f"Terminal Step, s_end: {s_end:.2f}, k_mag: {k_mag:.3f}, target vel: {target_vel:.3f} v_corner: {v_corner:.3f}, v_ref_k: {v_ref_k:.3f}")
+        
         yref_e = np.zeros(12)
         yref_e[0] = s_end
-        yref_e[3] = target_vel
-        # yref_e[3] = 0  # just hold zero speed for debugging
+        yref_e[3] = v_ref_k # Target the feasible speed at the end
         yref_e[11] = hover_T
-        
-        # print("desired thrust at end:", yref_e[11])
-        
-        
-        # yref exists by default inside casadi solver 
-        # we just need to set it
-        # even though yref_e  has different size than yref, because inside casadi it has been defined differently for terminal node
         self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
         # 4. Solve
@@ -673,7 +700,7 @@ class SpatialMPCController(Controller):
         # Log
         self._log_control_step(x_spatial, u_opt, status)
         
-        print("actual thrust command:", u_opt[3], "desired hover thrust:", yref_e[11], "max thrust:", self.params['thrust_max'] * 4, "min thrust:", self.params['thrust_min'] * 4)
+        # print("actual thrust command:", u_opt[3], "desired hover thrust:", yref_e[11], "max thrust:", self.params['thrust_max'] * 4, "min thrust:", self.params['thrust_min'] * 4)
 
         # Return [roll, pitch, yaw, thrust]
         return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
@@ -738,6 +765,9 @@ class SpatialMPCController(Controller):
         
         # if(self.step_count % 10 == 0):
         #     self.debug_plot_horizon()
+        
+        if(self.step_count % 40 != 0):
+            return  # Log every 10 steps only to reduce data size
             
         
         elapsed_time = (datetime.now() - self.episode_start_time).total_seconds()
