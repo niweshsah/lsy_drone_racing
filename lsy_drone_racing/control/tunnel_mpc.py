@@ -505,7 +505,7 @@ class SpatialMPCController(Controller):
         curr_ds = x_spatial[3]
         dt = self.mpc.Tf / self.mpc.N
         
-        # "Carrot" approach: Set target velocity high [cite: 586]
+        # "Carrot" approach: Set target velocity high
         target_vel = self.v_target 
         
         if self.env is not None:
@@ -545,7 +545,7 @@ class SpatialMPCController(Controller):
             ])
             self.mpc.solver.set(k, "p", p_k)
             
-            # C. Set Reference yref [cite: 558]
+            # C. Set Reference yref
             # Drive s forward aggressively
             s_ref = curr_s + (k + 1) * target_vel * dt
             
@@ -574,6 +574,11 @@ class SpatialMPCController(Controller):
         yref_e[11] = hover_T
         
         # print("desired thrust at end:", yref_e[11])
+        
+        
+        # yref exists by default inside casadi solver 
+        # we just need to set it
+        # even though yref_e  has different size than yref, because inside casadi it has been defined differently for terminal node
         self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
         # 4. Solve

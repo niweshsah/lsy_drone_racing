@@ -1,276 +1,266 @@
-import matplotlib.pyplot as plt  # noqa: D100
 import numpy as np
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicHermiteSpline
+from scipy.spatial.transform import Rotation as R
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import toml
+import os
 
+class GeometryEngine:
+    def __init__(self, gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos):
+        # --- FIX: Force float64 to avoid integer division errors ---
+        self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
+        self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
+        self.gate_y = np.asarray(gates_y, dtype=np.float64)
+        self.gate_z = np.asarray(gates_z, dtype=np.float64)
+        self.obstacles_pos = np.asarray(obstacles_pos, dtype=np.float64)
+        self.start_pos = np.asarray(start_pos, dtype=np.float64)
+        # -----------------------------------------------------------
 
-class GeometryEngine:  # noqa: D101
-    def __init__(self):  # noqa: D107
-        # 1. Define Waypoints (Same as in your controller)
+        # 1. Setup Waypoints
+        self.waypoints = np.vstack((self.start_pos, self.gates_pos))
         
-        # Waypoints in 3D space (x, y, z)
-        waypoints = np.array(
-            [
-                [-1.5, 0.75, 0.05],
-                [-1.0, 0.55, 0.4],
-                [0.3, 0.35, 0.7],
-                [1.3, -0.15, 0.9],
-                [0.85, 0.85, 1.2],
-                [-0.5, -0.05, 0.7],
-                [-1.2, -0.2, 0.8],
-                [-1.2, -0.2, 1.2],
-                [-0.0, -0.7, 1.2],
-                [0.5, -0.75, 1.2],
-            ]
-        )
+        # 2. Compute "Smart" Tangents 
+        # (Fixes loops and sharp turns by blending normals)
+        self.tangents = self._compute_smoothed_tangents(blend_strength=0.9)
 
-        # 2. Create Spline parameterized by approximate Arc Length (s)
-        # Calculate cumulative distance
-        # dists is the distance between consecutive waypoints
-        dists = np.linalg.norm(np.diff(waypoints, axis=0), axis=1)
+        # 3. Spline Generation (Chord-length parameterization)
+        dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
+        self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
+        self.total_length = self.s_knots[-1]
         
-        # Insert cumulative distances to get s values
-        # s = [0, d1, d1+d2, ..., total_length]
-        self.s_path = np.insert(np.cumsum(dists), 0, 0.0)
-        self.total_length = self.s_path[-1]
+        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
 
-        # CubicSpline: s -> (x,y,z)
-        self.spline = CubicSpline(self.s_path, waypoints)
+        # 4. Compute Parallel Transport Frame
+        self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)
 
-        # 3. Precompute Frame
-        self.pt_frame = self._generate_parallel_transport_frame()
+    def _compute_smoothed_tangents(self, blend_strength=0.9):
+        n_points = len(self.waypoints)
+        tangents = np.zeros_like(self.waypoints)
 
+        # --- A. Start Tangent ---
+        start_dir = self.waypoints[1] - self.waypoints[0]
+        tangents[0] = start_dir / np.linalg.norm(start_dir)
 
+        # --- B. Gate Tangents ---
+        for i in range(1, n_points):
+            curr_p = self.waypoints[i]
+            prev_p = self.waypoints[i-1]
+            
+            # Vector arriving at current gate
+            v_in = curr_p - prev_p
+            if np.linalg.norm(v_in) > 1e-6: v_in /= np.linalg.norm(v_in)
+            
+            # Vector leaving current gate
+            if i < n_points - 1:
+                next_p = self.waypoints[i+1]
+                v_out = next_p - curr_p
+                if np.linalg.norm(v_out) > 1e-6: v_out /= np.linalg.norm(v_out)
+            else:
+                v_out = v_in 
 
-    def _generate_parallel_transport_frame(self, num_points=1000):  # noqa: ANN001, ANN202
-        """Generates the Parallel Transport frame using the paper's update law.
-        Eq (7): [t, n1, n2]' = Matrix * [t, n1, n2].
-        """  # noqa: D205
+            # 1. Compute "Natural" Flow
+            t_natural = v_in + v_out
+            if np.linalg.norm(t_natural) > 1e-6:
+                t_natural /= np.linalg.norm(t_natural)
+            else:
+                t_natural = v_in 
+
+            # 2. Get Strict Gate Normal
+            gate_idx = i - 1
+            t_strict = self.gate_normals[gate_idx].copy()
+
+            # 3. AUTO-FLIP Check
+            if np.dot(t_strict, t_natural) < 0:
+                t_strict = -t_strict
+                self.gate_normals[gate_idx] = t_strict
+
+            # 4. Blend
+            t_final = (blend_strength * t_strict) + ((1 - blend_strength) * t_natural)
+            t_final /= np.linalg.norm(t_final)
+            tangents[i] = t_final
+
+        return tangents
+
+    def _generate_parallel_transport_frame(self, num_points=1000):
         s_eval = np.linspace(0, self.total_length, num_points)
-        ds = s_eval[1] - s_eval[0] # ds is the step size in s
+        ds = s_eval[1] - s_eval[0]
 
-        frames = {"s": s_eval, "pos": [], "t": [], "n1": [], "n2": [], "k1": [], "k2": []}
+        frames = {
+            "s": s_eval, "pos": [], "t": [], "n1": [], "n2": [], "k1": [], "k2": []
+        }
 
-        # --- Initialization (Section 2.4.1) ---
-        # "n2 is pointing to the direction of gravity" roughly
-        # t0 is the tangent at s=0
-        self.spline(0)
-        t_0 = self.spline(0, 1)  # First derivative
-        t_0 /= np.linalg.norm(t_0) # make it unit vector
-
-        # Initial Normal (Gram-Schmidt against Gravity)
-        g_vec = np.array([0, 0, -1])  # Down vector (gravity)
-
-        # If tangent is perfectly vertical, handle singularity
-        if np.linalg.norm(np.cross(t_0, g_vec)) < 1e-3:
-            dummy = np.array([1, 0, 0])
-            n1_0 = np.cross(t_0, dummy)
+        # Initial Frame Setup
+        t0 = self.spline(0, 1); t0 /= np.linalg.norm(t0)
+        
+        g_vec = np.array([0, 0, -1]) 
+        if np.linalg.norm(np.cross(t0, g_vec)) < 1e-3:
+            n2_0 = np.cross(t0, np.array([1, 0, 0]))
         else:
-            # Paper Eq 20 strategy: n2 is roughly g projected
-            # n2 = g - (g.t)t
-            # remove the projection onto t to get vector orthogonal to t
-            n2_0 = g_vec - np.dot(g_vec, t_0) * t_0
-            n2_0 /= np.linalg.norm(n2_0)
-            
-            
-            # n1 completes the triad
-            n1_0 = np.cross(n2_0, t_0)
+            n2_0 = g_vec - np.dot(g_vec, t0) * t0
+        
+        n2_0 /= np.linalg.norm(n2_0)
+        n1_0 = np.cross(n2_0, t0)
 
-        # Storage
-        curr_t = t_0
-        curr_n1 = n1_0
-        curr_n2 = n2_0
+        curr_t, curr_n1, curr_n2 = t0, n1_0, n2_0
 
         for i, s in enumerate(s_eval):
-            # 1. Exact Position & Tangent from Spline
             pos = self.spline(s)
-
-            # 2. Calculate Curvature Vector (dt/ds)
-            # Second derivative of position w.r.t s is curvature vector (approx)
-            curvature_vec = self.spline(s, 2)
-
-            # 3. Paper Logic: Find k1, k2 by projecting curvature
-            # The paper defines dot(t) = -k1*n1 - k2*n2 (Eq 7 implies this structure)
-            # Therefore:
-            # k1 = - dot(curvature_vec, curr_n1)
-            # k2 = - dot(curvature_vec, curr_n2)
-            k1 = -np.dot(curvature_vec, curr_n1)
-            k2 = -np.dot(curvature_vec, curr_n2)
-
-            # 4. Propagate Frame (Integration)
-            # Update t is handled by the spline geometry naturally,
-            # we mainly need to rotate n1 and n2 to stay twist-free.
-
-            # Eq 7: dot(n1) = k1 * t
-            # Eq 7: dot(n2) = k2 * t
+            k_vec = self.spline(s, 2)
+            
+            k1 = -np.dot(k_vec, curr_n1)
+            k2 = -np.dot(k_vec, curr_n2)
 
             next_n1 = curr_n1 + (k1 * curr_t) * ds
             next_n2 = curr_n2 + (k2 * curr_t) * ds
 
-            # 5. Re-align with new tangent (Gram-Schmidt)
-            # Get next tangent from spline geometry to be exact
             if i < len(s_eval) - 1:
-                next_t = self.spline(s_eval[i + 1], 1)
+                next_t = self.spline(s_eval[i+1], 1)
                 next_t /= np.linalg.norm(next_t)
             else:
-                next_t = curr_t  # End of path
+                next_t = curr_t
 
-            # Orthogonalize n1 against new t
             next_n1 = next_n1 - np.dot(next_n1, next_t) * next_t
             next_n1 /= np.linalg.norm(next_n1)
-
-            # Recompute n2 to ensure perfect triad
             next_n2 = np.cross(next_t, next_n1)
 
-            # Store
-            frames["pos"].append(pos)
-            frames["t"].append(curr_t)
-            frames["n1"].append(curr_n1)
-            frames["n2"].append(curr_n2)
-            frames["k1"].append(k1)
-            frames["k2"].append(k2)
+            frames["pos"].append(pos); frames["t"].append(curr_t)
+            frames["n1"].append(curr_n1); frames["n2"].append(curr_n2)
+            frames["k1"].append(k1); frames["k2"].append(k2)
 
-            # Update
-            curr_t = next_t
-            curr_n1 = next_n1
-            curr_n2 = next_n2
+            curr_t, curr_n1, curr_n2 = next_t, next_n1, next_n2
 
-        # Convert lists to numpy arrays
-        for key in frames:
-            frames[key] = np.array(frames[key])
-
+        for k in frames: frames[k] = np.array(frames[k])
         return frames
 
-    def verify_mathematically(self):
-        """Runs numerical assertions to ensure the frame is valid."""
-        print("\n--- Running Mathematical Verification ---")
+    def check_curvature_limits(self, desired_radius):
+        k_mag = np.sqrt(self.pt_frame['k1']**2 + self.pt_frame['k2']**2)
+        k_max = np.max(k_mag)
+        min_path_radius = 1.0 / k_max if k_max > 1e-6 else np.inf
+        
+        print(f"-"*40)
+        print(f"GEOMETRY CHECK:")
+        print(f"  Max Curvature (k):  {k_max:.4f} m^-1")
+        print(f"  Min Path Radius:    {min_path_radius:.4f} m")
+        
+        if desired_radius >= min_path_radius:
+            print(f"  [FAIL] Tunnel Radius ({desired_radius}m) > Min Path Radius ({min_path_radius:.4f}m).")
+            return False, k_mag
+        else:
+            print(f"  [PASS] Geometry Valid. Safety Margin: {(min_path_radius - desired_radius):.4f} m")
+            return True, k_mag
 
-        t = self.pt_frame["t"]
+    def plot(self, tunnel_radius=0.35):
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection="3d")
+        
+        valid, k_mag = self.check_curvature_limits(tunnel_radius)
+
+        path = self.pt_frame["pos"]
         n1 = self.pt_frame["n1"]
         n2 = self.pt_frame["n2"]
-        s = self.pt_frame["s"]
-        ds = s[1] - s[0]
 
-        # 1. Orthonormality Check
-        # t.t=1, n1.n1=1, n2.n2=1
-        norm_err = np.max(np.abs(np.linalg.norm(t, axis=1) - 1.0))
-        # t.n1=0, t.n2=0, n1.n2=0
-        orth_err_1 = np.max(np.abs(np.einsum("ij,ij->i", t, n1)))
-        orth_err_2 = np.max(np.abs(np.einsum("ij,ij", t, n2)))
-        orth_err_3 = np.max(np.abs(np.einsum("ij,ij", n1, n2)))
+        # --- Plot Tunnel ---
+        tube_res = 12 
+        tube_step = 5 
+        theta = np.linspace(0, 2 * np.pi, tube_res)
+        p_sub = path[::tube_step]   
+        n1_sub = n1[::tube_step]    
+        n2_sub = n2[::tube_step]    
 
-        print(f"[Check 1] Unit Norm Error: {norm_err:.2e}")
-        print(f"[Check 2] Orthogonality Error: {max(orth_err_1, orth_err_2, orth_err_3):.2e}")
+        cos_t = np.cos(theta)[None, :]
+        sin_t = np.sin(theta)[None, :]
 
-        assert norm_err < 1e-6, "Vectors are not unit length!"
-        assert orth_err_1 < 1e-6, "Vectors are not orthogonal!"
+        X = p_sub[:, 0, None] + tunnel_radius * (n1_sub[:, 0, None] * cos_t + n2_sub[:, 0, None] * sin_t)
+        Y = p_sub[:, 1, None] + tunnel_radius * (n1_sub[:, 1, None] * cos_t + n2_sub[:, 1, None] * sin_t)
+        Z = p_sub[:, 2, None] + tunnel_radius * (n1_sub[:, 2, None] * cos_t + n2_sub[:, 2, None] * sin_t)
 
-        # 2. Tangency Check
-        # Does 't' match the analytical derivative of the spline?
-        # Note: Spline derivative isn't normalized by default.
-        spline_t = self.spline(s, 1)
-        spline_t = spline_t / np.linalg.norm(spline_t, axis=1)[:, None]
-        tangency_err = np.max(np.linalg.norm(t - spline_t, axis=1))
+        color = 'cyan' if valid else 'red'
+        ax.plot_surface(X, Y, Z, color=color, alpha=0.15, linewidth=0)
+        ax.plot_wireframe(X, Y, Z, color='gray', alpha=0.1, rstride=5, cstride=100)
+        ax.plot(path[:, 0], path[:, 1], path[:, 2], 'k-', linewidth=2, label="Drone Path")
 
-        print(f"[Check 3] Tangency Mismatch: {tangency_err:.2e}")
-        assert tangency_err < 1e-3, "Frame tangent diverges from Spline tangent!"
+        # --- Plot Gates ---
+        for i, (p, n, y, z) in enumerate(zip(self.gates_pos, self.gate_normals, self.gate_y, self.gate_z)):
+            s = 0.45 
+            corners = np.array([p + s*(y + z), p + s*(y - z), p + s*(-y - z), p + s*(-y + z), p + s*(y + z)])
+            ax.plot(corners[:,0], corners[:,1], corners[:,2], color='magenta', linewidth=3)
+            ax.text(p[0], p[1], p[2] + 0.6, f"G{i}", color='magenta', fontsize=12, fontweight='bold')
+            ax.quiver(p[0], p[1], p[2], n[0], n[1], n[2], length=0.6, color='magenta', alpha=0.5)
 
-        # 3. Minimal Twist Check (The Parallel Transport Property)
-        # Definition: The derivative of n1 along s should have NO component in n2 direction.
-        # i.e., n1_dot . n2 ~= 0
+        ax.scatter(self.start_pos[0], self.start_pos[1], self.start_pos[2], c='green', s=100, label='Start')
 
-        # Numerical differentiation of n1
-        n1_dot = np.gradient(n1, ds, axis=0)
-
-        # Project n1_dot onto n2
-        twist_component = np.einsum("ij,ij->i", n1_dot, n2)
-        max_twist = np.max(np.abs(twist_component))
-        avg_twist = np.mean(np.abs(twist_component))
-
-        print(f"[Check 4] Twist Error (Max): {max_twist:.2e} rad/m")
-        print(f"[Check 4] Twist Error (Avg): {avg_twist:.2e} rad/m")
-
-        # Tolerance Note: Discrete integration always yields some error proportional to ds^2
-        if max_twist < 0.1:
-            print(">> SUCCESS: Frame is Twist-Minimal.")
-        else:
-            print(">> FAILURE: Frame is rotating around tangent!")
-
-    def plot_frame(self):
-        """Visualizes the Spline and PT Frame."""
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection="3d")
-
-        # Plot Path
-        pos = self.pt_frame["pos"]
-        ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], "k-", linewidth=2, label="Path")
-
-        # Subsample for quiver plot (too many arrows looks messy)
-        step = 30
-        idx = np.arange(0, len(pos), step)
-
-        xyz = pos[idx]
-        t = self.pt_frame["t"][idx]
-        n1 = self.pt_frame["n1"][idx]
-        n2 = self.pt_frame["n2"][idx]
-
-        # Plot Frame Vectors
-        # Tangent (Red)
-        ax.quiver(
-            xyz[:, 0],
-            xyz[:, 1],
-            xyz[:, 2],
-            t[:, 0],
-            t[:, 1],
-            t[:, 2],
-            color="r",
-            length=0.2,
-            normalize=True,
-            label="Tangent (t)",
-        )
-
-        # Normal 1 (Green)
-        ax.quiver(
-            xyz[:, 0],
-            xyz[:, 1],
-            xyz[:, 2],
-            n1[:, 0],
-            n1[:, 1],
-            n1[:, 2],
-            color="g",
-            length=0.2,
-            normalize=True,
-            label="Normal 1 (n1)",
-        )
-
-        # Normal 2 (Blue)
-        ax.quiver(
-            xyz[:, 0],
-            xyz[:, 1],
-            xyz[:, 2],
-            n2[:, 0],
-            n2[:, 1],
-            n2[:, 2],
-            color="b",
-            length=0.2,
-            normalize=True,
-            label="Normal 2 (n2)",
-        )
-
-        ax.set_title("Parallel Transport Frame Verification")
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        ax.legend()
+        mid_x, mid_y, mid_z = np.mean(path[:,0]), np.mean(path[:,1]), np.mean(path[:,2])
+        r = 3.0 
+        ax.set_xlim(mid_x - r, mid_x + r); ax.set_ylim(mid_y - r, mid_y + r); ax.set_zlim(mid_z - r, mid_z + r)
+        plt.legend()
         plt.show()
 
+# ---------------------------------------------------------
+# Loader Logic
+# ---------------------------------------------------------
+def load_from_toml(filepath: str):
+    """
+    Parses the TOML file. Handles RPY (Roll-Pitch-Yaw) if present.
+    """
+    print(f"Loading config from: {filepath}")
+    with open(filepath, "r") as f:
+        data = toml.load(f)
+    
+    # 1. Parse Gates
+    gates_raw = data["env"]["track"]["gates"]
+    print(f"Found {len(gates_raw)} gates.")
+    
+    # Extract Positions
+    gates_pos = np.array([g["pos"] for g in gates_raw], dtype=np.float64)
+    
+    # Extract Orientations (RPY)
+    # Default to [0,0,0] if not found
+    gates_rpy = np.array([g.get("rpy", [0, 0, 0]) for g in gates_raw], dtype=np.float64)
+
+    # Convert RPY -> Rotation Matrices -> Normals/Axes
+    # Assuming standard "xyz" Euler order (common in robotics)
+    rot = R.from_euler("xyz", gates_rpy, degrees=False) # Change degrees=True if your TOML uses degrees
+    matrices = rot.as_matrix()
+
+    # In body frame: X=Normal, Y=Left, Z=Up (Standard for many drone setups)
+    gates_normals = matrices[:, :, 0] 
+    gates_y = matrices[:, :, 1]
+    gates_z = matrices[:, :, 2]
+
+    # 2. Parse Obstacles
+    obs_raw = data["env"]["track"].get("obstacles", [])
+    obstacles_pos = np.array([o["pos"] for o in obs_raw], dtype=np.float64) if obs_raw else np.empty((0, 3))
+    
+    # 3. Parse Start Pos
+    start_pos = np.array(data["env"]["track"]["drones"][0]["pos"], dtype=np.float64)
+    
+    return gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos
 
 if __name__ == "__main__":
-    geo = GeometryEngine()
-    print(f"Path Length: {geo.total_length:.2f} m")
+    # 1. Try to load file, otherwise use dummy data
+    toml_path = "config/level1_noObstacle.toml" 
+    
+    if os.path.exists(toml_path):
+        try:
+            g_pos, g_norm, g_y, g_z, obs_pos, s_pos = load_from_toml(toml_path)
+            print("Loaded TOML successfully.")
+        except Exception as e:
+            print(f"Error loading TOML: {e}")
+            # Fallback if file exists but parsing fails
+            exit(1)
+    else:
+        print(f"TOML file '{toml_path}' not found. Using DUMMY test data.")
+        s_pos = [0, 0, 1]
+        g_pos = [[2, 0, 1], [4, 2, 1], [6, 0, 1], [8, 2, 2]]
+        g_norm = [[1, 0, 0], [0, 1, 0], [-1, 0, 0], [1, 0, 1]] 
+        g_norm = [np.array(n)/np.linalg.norm(n) for n in g_norm]
+        g_y = [[0,1,0], [-1,0,0], [0,1,0], [-1,0,0]] 
+        g_z = [[0,0,1], [0,0,1], [0,0,1], [0,0,1]]
+        obs_pos = []
 
-    # 1. Math Verification
-    geo.verify_mathematically()
-
-    # 2. Visual Verification
-    print("\nVisualizing Frame...")
-    geo.plot_frame()
+    # 2. Init Engine
+    geom = GeometryEngine(g_pos, g_norm, g_y, g_z, obs_pos, s_pos)
+    
+    # 3. Plot
+    geom.plot(tunnel_radius=0.25)

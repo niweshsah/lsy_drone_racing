@@ -16,6 +16,7 @@ from scipy.interpolate import CubicHermiteSpline
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control.controller import Controller
+from lsy_drone_racing.utils.utils import draw_line
 
 # Use non-interactive backend for saving plots
 matplotlib.use('Agg')
@@ -40,7 +41,7 @@ def get_drone_params():  # noqa: ANN201
             "J": np.diag([25e-6, 28e-6, 49e-6]),
             "J_inv": np.linalg.inv(np.diag([25e-6, 28e-6, 49e-6])),
             "thrust_min": 0.0,
-            "thrust_max": 0.8, # Normalized or Newtons depending on cmd_f_coef
+            "thrust_max": 0.2, # Normalized or Newtons depending on cmd_f_coef
             # System ID Coefficients (Linear Response Model)
             "acc_coef": 0.0, # Bias term for thrust curve
             "cmd_f_coef": 0.96836458, # Slope for thrust curve
@@ -181,36 +182,81 @@ def export_model(params: dict) -> AcadosModel:
 # ==============================================================================
 
 class GeometryEngine:
-    def __init__(self, gates_pos, start_pos):
-        self.gates_pos = np.asarray(gates_pos)
-        self.start_pos = np.asarray(start_pos)
+    def __init__(self, gates_pos, gates_normals,  start_pos):
+        self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
+        self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
+        # self.gate_y = np.asarray(gates_y, dtype=np.float64)
+        # self.gate_z = np.asarray(gates_z, dtype=np.float64)
+        # self.obstacles_pos = np.asarray(obstacles_pos, dtype=np.float64)
+        self.start_pos = np.asarray(start_pos, dtype=np.float64)
+        # -----------------------------------------------------------
 
-        # 1. Waypoints
+        # 1. Setup Waypoints
         self.waypoints = np.vstack((self.start_pos, self.gates_pos))
         
-        # 2. Tangents (Finite difference)
-        tangents = []
-        for i in range(len(self.waypoints)):
-            if i < len(self.waypoints) - 1:
-                t = self.waypoints[i+1] - self.waypoints[i]
-            else:
-                t = self.waypoints[i] - self.waypoints[i-1]
-            norm = np.linalg.norm(t)
-            tangents.append(t / norm if norm > 1e-6 else np.array([1,0,0]))
-        self.tangents = np.array(tangents)
+        # 2. Compute "Smart" Tangents 
+        # (Fixes loops and sharp turns by blending normals)
+        self.tangents = self._compute_smoothed_tangents(blend_strength=0.9)
 
-        # 3. Spline Construction
-        # Calculate approximate arc length 's' for knots
+        # 3. Spline Generation (Chord-length parameterization)
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
         self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
         self.total_length = self.s_knots[-1]
         
-        # Cubic Hermite Spline for position
         self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
-        
-        # 4. Generate Pre-computed Frame Data
-        self.pt_frame = self._generate_parallel_transport_frame()
 
+        # 4. Compute Parallel Transport Frame
+        self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)
+
+    def _compute_smoothed_tangents(self, blend_strength=0.9):  # noqa: ANN202
+        n_points = len(self.waypoints)
+        tangents = np.zeros_like(self.waypoints)
+
+        # --- A. Start Tangent ---
+        start_dir = self.waypoints[1] - self.waypoints[0]
+        tangents[0] = start_dir / np.linalg.norm(start_dir)
+
+        # --- B. Gate Tangents ---
+        for i in range(1, n_points):
+            curr_p = self.waypoints[i]
+            prev_p = self.waypoints[i-1]
+            
+            # Vector arriving at current gate
+            v_in = curr_p - prev_p
+            if np.linalg.norm(v_in) > 1e-6: v_in /= np.linalg.norm(v_in)
+            
+            # Vector leaving current gate
+            if i < n_points - 1:
+                next_p = self.waypoints[i+1]
+                v_out = next_p - curr_p
+                if np.linalg.norm(v_out) > 1e-6: v_out /= np.linalg.norm(v_out)
+            else:
+                v_out = v_in 
+
+            # 1. Compute "Natural" Flow
+            t_natural = v_in + v_out
+            if np.linalg.norm(t_natural) > 1e-6:
+                t_natural /= np.linalg.norm(t_natural)
+            else:
+                t_natural = v_in 
+
+            # 2. Get Strict Gate Normal
+            gate_idx = i - 1
+            t_strict = self.gate_normals[gate_idx].copy()
+
+            # 3. AUTO-FLIP Check
+            if np.dot(t_strict, t_natural) < 0:
+                t_strict = -t_strict
+                self.gate_normals[gate_idx] = t_strict
+
+            # 4. Blend
+            t_final = (blend_strength * t_strict) + ((1 - blend_strength) * t_natural)
+            t_final /= np.linalg.norm(t_final)
+            tangents[i] = t_final
+
+        return tangents
+        
+        
     def _generate_parallel_transport_frame(self, num_points=3000):
         """Generates the Parallel Transport frame and pre-calculates curvature derivatives."""
         s_eval = np.linspace(0, self.total_length, num_points)
@@ -328,6 +374,7 @@ class SpatialMPC:
     def __init__(self, params, N=20, Tf=1.0):
         self.N = N
         self.Tf = Tf
+        params['g'] = params['gravity_vec'][2]  # Ensure g is consistent
         self.params = params
         
         # Clean compile directory
@@ -355,7 +402,7 @@ class SpatialMPC:
         # High penalty on w1/w2 (corridor). 
         # Low penalty on s (we drive s via reference).
         q_diag = np.array([
-            0.0, 20.0, 20.0,    # Pos
+            10.0, 20.0, 20.0,    # Pos
             10.0, 5.0,  5.0,    # Vel
             1.0,  1.0,  1.0,    # Att
             0.1,  0.1,  0.1     # Rate
@@ -374,16 +421,22 @@ class SpatialMPC:
         ocp.cost.yref_e = np.zeros(ny_e)
 
         # --- CONSTRAINTS ---
+        #  # Set State Constraints (rpy < 30°)
+        # ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5])
+        # ocp.constraints.ubx = np.array([0.5, 0.5, 0.5])
+        # ocp.constraints.idxbx = np.array([6, 7, 8])  # Indices of phi, theta, psi in state vector
+        
+        
         # Hard Inputs
         ocp.constraints.idxbu = np.array([0, 1, 2, 3])
-        ocp.constraints.lbu = np.array([-0.8, -0.8, -0.8, self.params['thrust_min']])
-        ocp.constraints.ubu = np.array([+0.8, +0.8, +0.8, self.params['thrust_max']])
+        ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, self.params['thrust_min'] * 4] )
+        ocp.constraints.ubu = np.array([+0.5, +0.5, +0.5, self.params['thrust_max'] * 4])
         
         # Soft State Bounds (Corridor) [cite: 305]
         # w1, w2 indices in x are 1 and 2
-        ocp.constraints.idxbx = np.array([1, 2])
-        ocp.constraints.lbx = np.array([-0.5, -0.5]) 
-        ocp.constraints.ubx = np.array([+0.5, +0.5])
+        ocp.constraints.idxbx = np.array([1, 2 , 6 , 7 , 8])  # w1, w2, phi, theta, psi
+        ocp.constraints.lbx = np.array([-0.3, -0.3 , -0.5, -0.5, -0.5]) 
+        ocp.constraints.ubx = np.array([+0.3, +0.3, +0.5, +0.5, +0.5])
         
         # Slack Config
         ns = 2
@@ -421,10 +474,12 @@ class SpatialMPC:
 # ==============================================================================
 
 class SpatialMPCController(Controller):
-    def __init__(self, obs: dict, info: dict, config: dict):
+    def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 4.0 # Target speed (aggressive)
+        self.v_target = 1.0 # Target speed (aggressive)
+        
+        self.env = env
         
         # 2. Geometry
         gates_list = config.get("env", {}).get("track", {}).get("gates", [])
@@ -434,7 +489,10 @@ class SpatialMPCController(Controller):
         gates_pos = [g["pos"] for g in gates_list]
         start_pos = obs["pos"]
         
-        self.geo = GeometryEngine(gates_pos, start_pos)
+        gates_quaternions = obs['gates_quat']
+        gates_normals = self._get_gate_normals(gates_quaternions)
+        
+        self.geo = GeometryEngine(gates_pos, gates_normals , start_pos)
         
         # 3. Solver
         self.N_horizon = 20
@@ -448,23 +506,38 @@ class SpatialMPCController(Controller):
         self.debug = True
 
         self.reset_mpc_solver()
+        
+        
+    def _get_gate_normals(self, gates_quaternions : np.ndarray) -> np.ndarray:
+        rotations = R.from_quat(gates_quaternions)
+        rotation_matrices = rotations.as_matrix()
+        gates_normals = rotation_matrices[:, :, 0]  # X-axis (normal)q
+        return gates_normals
 
     def reset_mpc_solver(self):
         """Warm starts the solver with a forward guess."""
         nx = 12
         hover_T = self.params['mass'] * self.params['g']
+        mass = self.params['mass']
+        g = self.params['g']
+        acc_coef = self.params['acc_coef']
+        cmd_f_coef = self.params['cmd_f_coef']
+        hover_T = (mass * g - acc_coef) / cmd_f_coef
         
         for k in range(self.N_horizon + 1):
             x_guess = np.zeros(nx)
-            # Guess forward progress
-            x_guess[0] = self.v_target * k * (self.mpc.Tf / self.N_horizon)
-            x_guess[3] = self.v_target # Target velocity
+            # Linear ramp from 0 to v_target
+            vel_k = self.v_target * (k / self.N_horizon) 
+            x_guess[3] = vel_k 
+            x_guess[0] = vel_k * k * (self.mpc.Tf / self.N_horizon) * 0.5 # 1/2 a*t^2 approx
             
             self.mpc.solver.set(k, "x", x_guess)
             if k < self.N_horizon:
                 self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
         
         self.prev_s = 0.0
+        
+    
 
     def compute_control(self, obs: dict, info: dict | None = None) -> np.ndarray:
         
@@ -472,9 +545,9 @@ class SpatialMPCController(Controller):
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
         
-        hover_T = self.params['mass'] * self.params['g']
+        hover_T = self.params['mass'] * -self.params['g']
         
-        # 1. State Feedback (World -> Spatial) [cite: 239-245]
+        # 1. State Feedback (World -> Spatial)
         x_spatial = self._cartesian_to_spatial(obs["pos"], obs["vel"], obs["rpy"], obs["drpy"])
         
         # Update current state constraint (x0)
@@ -486,8 +559,31 @@ class SpatialMPCController(Controller):
         curr_ds = x_spatial[3]
         dt = self.mpc.Tf / self.mpc.N
         
-        # "Carrot" approach: Set target velocity high [cite: 586]
+        # "Carrot" approach: Set target velocity high
         target_vel = self.v_target 
+        
+        if self.env is not None:
+            try:
+                # 1. Get the points. 
+                # self.geo.pt_frame['pos'] contains the pre-calculated center line.
+                # We slice [::5] to reduce rendering load (draw every 5th point)
+                path_points = self.geo.pt_frame['pos'][::5]
+                
+                # 2. Draw the line
+                # Green color (R=0, G=1, B=0, Alpha=0.5)
+                draw_line(
+                    env=self.env,
+                    points=path_points,
+                    rgba=np.array([0.0, 1.0, 0.0, 0.5]), 
+                    min_size=2.0,
+                    max_size=2.0
+                )
+            except Exception as e:
+                # Catch errors to ensure the drone keeps flying even if drawing fails
+                if self.debug: 
+                    print(f"Vis Error: {e}")
+        # --- VISUALIZATION END ---
+
 
         for k in range(self.mpc.N):
             # A. Predict s for parameter lookup
@@ -503,13 +599,14 @@ class SpatialMPCController(Controller):
             ])
             self.mpc.solver.set(k, "p", p_k)
             
-            # C. Set Reference yref [cite: 558]
+            # C. Set Reference yref
             # Drive s forward aggressively
             s_ref = curr_s + (k + 1) * target_vel * dt
             
             y_ref = np.zeros(16)
             y_ref[0] = s_ref        # Target progress
             y_ref[3] = target_vel   # Target speed
+            # y_ref[3] = 0   # just hold zero speed for debugging
             y_ref[15] = hover_T     # Feedforward thrust
             
             self.mpc.solver.set(k, "yref", y_ref)
@@ -527,6 +624,15 @@ class SpatialMPCController(Controller):
         yref_e = np.zeros(12)
         yref_e[0] = s_end
         yref_e[3] = target_vel
+        # yref_e[3] = 0  # just hold zero speed for debugging
+        yref_e[11] = hover_T
+        
+        # print("desired thrust at end:", yref_e[11])
+        
+        
+        # yref exists by default inside casadi solver 
+        # we just need to set it
+        # even though yref_e  has different size than yref, because inside casadi it has been defined differently for terminal node
         self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
         # 4. Solve
@@ -541,6 +647,8 @@ class SpatialMPCController(Controller):
             
         # Log
         self._log_control_step(x_spatial, u_opt, status)
+        
+        print("actual thrust command:", u_opt[3], "desired hover thrust:", yref_e[11], "max thrust:", self.params['thrust_max'] * 4, "min thrust:", self.params['thrust_min'] * 4)
 
         # Return [roll, pitch, yaw, thrust]
         return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
@@ -562,7 +670,7 @@ class SpatialMPCController(Controller):
         # 4. Scaling Factor h
         h = 1 - f['k1'] * w1 - f['k2'] * w2
         # Safety clamp to avoid division by zero in tight loops
-        h = max(h, 0.1) 
+        h = max(h, 0.01) 
         
         # 5. Calculate Spatial Velocities
         ds = np.dot(vel, f['t']) / h
@@ -571,20 +679,243 @@ class SpatialMPCController(Controller):
         
         return np.array([s, w1, w2, ds, dw1, dw2, rpy[0], rpy[1], rpy[2], drpy[0], drpy[1], drpy[2]])
 
-    def _log_control_step(self, x_spatial, u_opt, status):
-        # Basic logging implementation
-        self.step_count += 1
-        elapsed = (datetime.now() - self.episode_start_time).total_seconds()
-        
-        self.control_log['timestamps'].append(elapsed)
-        self.control_log['s'].append(x_spatial[0])
-        self.control_log['w1'].append(x_spatial[1])
-        self.control_log['thrust_c'].append(u_opt[3])
-        self.control_log['solver_status'].append(status)
+    def reset(self):
+        """Reset internal variables."""
+        self.prev_s = 0.0
+        self.reset_mpc_solver()
 
-    def episode_callback(self):
-        # Placeholder for plotting logic
-        pass
+    def episode_reset(self):
+        """Reset the controller's internal state and models."""
+        self.reset()
 
     def step_callback(self, action, obs, reward, terminated, truncated, info):
+        """Called at each environment step. Returns False to keep running."""
         return False
+
+    def episode_callback(self):
+        """Called at the end of each episode. Generate plots here."""
+        # if len(self.control_log['timestamps']) > 0:
+        #     self.plot_all_diagnostics()
+        return
+
+    def _log_control_step(self, x_spatial: np.ndarray, u_opt: np.ndarray, solver_status: int):
+        """Log control values and state for debugging."""
+        self.step_count += 1
+        
+        # if(self.step_count % 10 == 0):
+        #     self.debug_plot_horizon()
+            
+        
+        elapsed_time = (datetime.now() - self.episode_start_time).total_seconds()
+        
+        # Log data
+        self.control_log['timestamps'].append(elapsed_time)
+        self.control_log['phi_c'].append(float(u_opt[0]))
+        self.control_log['theta_c'].append(float(u_opt[1]))
+        self.control_log['psi_c'].append(float(u_opt[2]))
+        self.control_log['thrust_c'].append(float(u_opt[3]))
+        self.control_log['solver_status'].append(int(solver_status))
+        self.control_log['s'].append(float(x_spatial[0]))
+        self.control_log['w1'].append(float(x_spatial[1]))
+        self.control_log['w2'].append(float(x_spatial[2]))
+        self.control_log['ds'].append(float(x_spatial[3]))
+        
+        # Console print
+        if self.debug:
+            print(f"[Step {self.step_count}] t={elapsed_time:.3f}s | "
+                  f"φ_c={u_opt[0]:+.4f} θ_c={u_opt[1]:+.4f} ψ_c={u_opt[2]:+.4f} T_c={u_opt[3]:.4f} | "
+                  f"s={x_spatial[0]:.2f} w1={x_spatial[1]:+.4f} w2={x_spatial[2]:+.4f} ds={x_spatial[3]:.3f} | "
+                  f"Status={solver_status}")
+
+    def save_control_log(self, filepath: str = None):
+        """Save control log to JSON file."""
+        if filepath is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            filepath = f"control_log_{timestamp}.json"
+        
+        with open(filepath, 'w') as f:
+            json.dump(self.control_log, f, indent=2)
+        
+        if self.debug:
+            print(f"\nControl log saved to: {filepath}")
+        return filepath
+
+    def plot_control_values(self, figsize=(16, 10), save_path: str = None):
+        """Plot control values over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No control data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        
+        fig, axes = plt.subplots(3, 2, figsize=figsize)
+        fig.suptitle('MPC Control Values & State Feedback', fontsize=16, fontweight='bold')
+        
+        # Row 1: Attitude Commands
+        ax = axes[0, 0]
+        ax.plot(t, self.control_log['phi_c'], 'b-', linewidth=2, label='φ_c (Roll)')
+        ax.set_ylabel('Roll Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[0, 1]
+        ax.plot(t, self.control_log['theta_c'], 'g-', linewidth=2, label='θ_c (Pitch)')
+        ax.set_ylabel('Pitch Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 2: Thrust & Yaw
+        ax = axes[1, 0]
+        ax.plot(t, self.control_log['thrust_c'], 'r-', linewidth=2, label='T_c (Thrust)')
+        ax.axhline(y=self.params['mass'] * self.params['g'], color='k', linestyle='--', 
+                   label='Hover Thrust', alpha=0.5)
+        ax.set_ylabel('Thrust Command (N)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[1, 1]
+        ax.plot(t, self.control_log['psi_c'], 'm-', linewidth=2, label='ψ_c (Yaw)')
+        ax.set_ylabel('Yaw Command (rad)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Row 3: Path-following state
+        ax = axes[2, 0]
+        ax.plot(t, self.control_log['s'], 'c-', linewidth=2, label='s (Arc length)')
+        ax.set_ylabel('Arc Length (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        ax = axes[2, 1]
+        ax.plot(t, self.control_log['w1'], 'orange', linewidth=2, label='w1 (Lateral)')
+        ax.plot(t, self.control_log['w2'], 'purple', linewidth=2, label='w2 (Vertical)')
+        ax.axhline(y=0.5, color='r', linestyle='--', alpha=0.5, label='Bounds')
+        ax.axhline(y=-0.5, color='r', linestyle='--', alpha=0.5)
+        ax.set_ylabel('Lateral/Vertical Error (m)', fontweight='bold')
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"control_plot_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Control plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+
+    def plot_solver_status(self, save_path: str = None):
+        """Plot solver status over time."""
+        if len(self.control_log['timestamps']) == 0:
+            print("No data to plot!")
+            return
+        
+        t = np.array(self.control_log['timestamps'])
+        status = np.array(self.control_log['solver_status'])
+        fig, ax = plt.subplots(figsize=(12, 4))
+        
+        # Color code: green=0 (success), red=non-zero (failure)
+        colors = ['green' if s == 0 else 'red' for s in status]
+        ax.scatter(t, status, c=colors, s=50, alpha=0.6, edgecolors='black')
+        
+        ax.set_xlabel('Time (s)', fontweight='bold')
+        ax.set_ylabel('Solver Status', fontweight='bold')
+        ax.set_title('MPC Solver Status Over Time (Green=Success, Red=Failure)', 
+                     fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.5, max(status) + 1)
+        
+        plt.tight_layout()
+        
+        if save_path is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_path = f"solver_status_{timestamp}.png"
+        
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        if self.debug:
+            print(f"Solver status plot saved to: {save_path}")
+        plt.close()
+        
+        return save_path
+    
+    def debug_plot_horizon(self):
+        """Plots what the solver THINKS will happen over the next N steps."""
+        nx = 12
+        pred_x = []
+        pred_u = []
+        
+        # Fetch the open-loop prediction from Acados
+        for k in range(self.mpc.N + 1):
+            pred_x.append(self.mpc.solver.get(k, "x"))
+            if k < self.mpc.N:
+                pred_u.append(self.mpc.solver.get(k, "u"))
+        
+        pred_x = np.array(pred_x) # Shape (N+1, 12)
+        pred_u = np.array(pred_u) # Shape (N, 4)
+
+        # Plot
+        fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+        fig.suptitle(f"Solver Prediction at Step {self.step_count}")
+
+        # 1. Progress (s) & Velocity (ds)
+        axs[0,0].plot(pred_x[:, 0], label="Predicted s")
+        axs[0,0].plot(pred_x[:, 3], label="Predicted ds")
+        axs[0,0].set_title("Progress & Speed")
+        axs[0,0].legend()
+        axs[0,0].grid(True)
+
+        # 2. Corridor Errors (w1, w2)
+        axs[0,1].plot(pred_x[:, 1], label="w1 (Lat)")
+        axs[0,1].plot(pred_x[:, 2], label="w2 (Vert)")
+        axs[0,1].axhline(0.5, color='r', linestyle='--') # Bounds
+        axs[0,1].axhline(-0.5, color='r', linestyle='--')
+        axs[0,1].set_title("Corridor Deviation")
+        axs[0,1].legend()
+
+        # 3. Attitude (rpy)
+        axs[1,0].plot(pred_x[:, 6], label="Phi")
+        axs[1,0].plot(pred_x[:, 7], label="Theta")
+        axs[1,0].set_title("Predicted Attitude")
+        axs[1,0].legend()
+
+        # 4. Inputs (Thrust)
+        axs[1,1].step(range(len(pred_u)), pred_u[:, 3], label="Thrust Cmd")
+        axs[1,1].set_title("Planned Thrust")
+        axs[1,1].set_ylim(-0.1, 1.0) # Adjust to your thrust scale
+        axs[1,1].legend()
+
+        plt.tight_layout()
+        # os.makedirs("debug_plots", exist_ok=True)
+        dir_path = f"mpc_debug/mpc_diagnostics_{self.episode_start_time.strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(dir_path, exist_ok=True)
+        
+        plt.savefig(f"{dir_path}/horizon_{self.step_count:04d}.png")
+        plt.close()
+
+    def plot_all_diagnostics(self, save_dir: str = None):
+        """Generate all diagnostic plots at once."""
+        if save_dir is None:
+            timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
+            save_dir = f"mpc_debug/mpc_diagnostics_{timestamp}"
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        log_file = self.save_control_log(os.path.join(save_dir, "control_log.json"))
+        control_plot = self.plot_control_values(save_path=os.path.join(save_dir, "control_values.png"))
+        status_plot = self.plot_solver_status(save_path=os.path.join(save_dir, "solver_status.png"))
+        
+        if self.debug:
+            print(f"\n{'='*60}")
+            print(f"All diagnostics saved to: {save_dir}")
+            print(f"  - {log_file}")
+            print(f"  - {control_plot}")
+            print(f"  - {status_plot}")
+            print(f"{'='*60}")
+        
+        return save_dir

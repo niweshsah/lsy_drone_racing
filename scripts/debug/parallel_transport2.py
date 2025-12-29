@@ -1,23 +1,26 @@
 import numpy as np
 from scipy.interpolate import CubicHermiteSpline
+from scipy.interpolate import CubicSpline  # type: ignore
+
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import toml
 
 class GeometryEngine:
-    def __init__(self, gates_pos, gates_rpy, obstacles_pos, start_pos):
+    def __init__(self, gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos):
         self.gates_pos = np.asarray(gates_pos)
-        self.gates_rpy = np.asarray(gates_rpy)
+        self.gate_normals = np.asarray(gates_normals)
+        self.gate_y = np.asarray(gates_y)
+        self.gate_z = np.asarray(gates_z)
         self.obstacles_pos = np.asarray(obstacles_pos)
         self.start_pos = np.asarray(start_pos)
 
         # 1. Gate Orientations
-        rot = R.from_euler("xyz", self.gates_rpy)
-        self.Rm = rot.as_matrix()
-        self.gate_normals = self.Rm[:, :, 0] 
-        self.gate_y = self.Rm[:, :, 1]
-        self.gate_z = self.Rm[:, :, 2]
+        # rot = R.from_euler("xyz", self.gates_rpy)
+        # self.Rm = rot.as_matrix()
+        # self.gate_y = self.Rm[:, :, 1]
+        # self.gate_z = self.Rm[:, :, 2]
 
         # 2. Waypoints & Tangents
         self.waypoints = np.vstack((self.start_pos, self.gates_pos))
@@ -29,7 +32,7 @@ class GeometryEngine:
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
         self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
         self.total_length = self.s_knots[-1]
-        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
+        self.spline = CubicSpline(self.s_knots, self.waypoints, self.tangents)
 
         # 4. Compute Frame
         self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)
@@ -186,21 +189,30 @@ class GeometryEngine:
 # ---------------------------------------------------------
 # Loader
 # ---------------------------------------------------------
+def get_gate_features(gates_quaternions : np.ndarray) -> [np.ndarray, np.ndarray, np.ndarray]:
+        rotations = R.from_quat(gates_quaternions)
+        rotation_matrices = rotations.as_matrix()
+        gates_normals = rotation_matrices[:, :, 0]  # X-axis (normal)
+        gates_y = rotation_matrices[:, :, 1]      # Y-axis
+        gates_z = rotation_matrices[:, :, 2]      # Z-axis
+        return gates_normals, gates_y, gates_z
+
 def load_from_toml(filepath: str):
     with open(filepath, "r") as f:
         data = toml.load(f)
     gates_raw = data["env"]["track"]["gates"]
     gates_pos = np.array([g["pos"] for g in gates_raw], dtype=float)
-    gates_rpy = np.array([g.get("rpy", [0, 0, 0]) for g in gates_raw], dtype=float)
+    gates_quat = np.array([g.get("gates_quat", [0, 0, 0, 1]) for g in gates_raw], dtype=float)
+    gates_normals, gates_y, gates_z = get_gate_features(gates_quat)
     obs_raw = data["env"]["track"].get("obstacles", [])
     obstacles_pos = np.array([o["pos"] for o in obs_raw], dtype=float) if obs_raw else np.empty((0, 3))
     start_pos = np.array(data["env"]["track"]["drones"][0]["pos"], dtype=float)
-    return gates_pos, gates_rpy, obstacles_pos, start_pos
+    return gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos
 
 if __name__ == "__main__":
     try:
         # gates_pos, gates_rpy, obstacles_pos, start_pos = load_from_toml("config/level2.toml")
-        gates_pos, gates_rpy, obstacles_pos, start_pos = load_from_toml("config/level2_noObstacle.toml")
+        gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos = load_from_toml("config/level2_noObstacle.toml")
     except:
         print("Using dummy data")
         # A very tight turn to demonstrate failure
@@ -209,7 +221,7 @@ if __name__ == "__main__":
         obstacles_pos = []
         start_pos = [0,0,1]
 
-    geom = GeometryEngine(gates_pos, gates_rpy, obstacles_pos, start_pos)
+    geom = GeometryEngine(gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos)
     
     # ---------------------------------------------------
     # TUNNEL RADIUS CHECK

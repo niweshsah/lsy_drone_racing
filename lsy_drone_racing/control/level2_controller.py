@@ -57,7 +57,7 @@ class MyController(Controller):
     DETOUR_ANGLE_THRESHOLD = 120.0  # Angle (degrees) triggering a detour insertion
     DETOUR_RADIUS = 0.65  # Distance to offset detour points
 
-    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict):
+    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env=None):
         """Initializes the controller, sets up state, and plans the first trajectory.
 
         Args:
