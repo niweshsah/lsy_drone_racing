@@ -16,6 +16,7 @@ from scipy.interpolate import CubicHermiteSpline
 from scipy.spatial.transform import Rotation as R
 
 from lsy_drone_racing.control.controller import Controller
+from lsy_drone_racing.utils.utils import draw_line
 
 # Use non-interactive backend for saving plots
 matplotlib.use('Agg')
@@ -40,7 +41,7 @@ def get_drone_params():  # noqa: ANN201
             "J": np.diag([25e-6, 28e-6, 49e-6]),
             "J_inv": np.linalg.inv(np.diag([25e-6, 28e-6, 49e-6])),
             "thrust_min": 0.0,
-            "thrust_max": 0.8, # Normalized or Newtons depending on cmd_f_coef
+            "thrust_max": 0.2, # Normalized or Newtons depending on cmd_f_coef
             # System ID Coefficients (Linear Response Model)
             "acc_coef": 0.0, # Bias term for thrust curve
             "cmd_f_coef": 0.96836458, # Slope for thrust curve
@@ -357,7 +358,7 @@ class SpatialMPC:
         # High penalty on w1/w2 (corridor). 
         # Low penalty on s (we drive s via reference).
         q_diag = np.array([
-            0.0, 20.0, 20.0,    # Pos
+            10.0, 20.0, 20.0,    # Pos
             10.0, 5.0,  5.0,    # Vel
             1.0,  1.0,  1.0,    # Att
             0.1,  0.1,  0.1     # Rate
@@ -376,16 +377,22 @@ class SpatialMPC:
         ocp.cost.yref_e = np.zeros(ny_e)
 
         # --- CONSTRAINTS ---
+        #  # Set State Constraints (rpy < 30°)
+        # ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5])
+        # ocp.constraints.ubx = np.array([0.5, 0.5, 0.5])
+        # ocp.constraints.idxbx = np.array([6, 7, 8])  # Indices of phi, theta, psi in state vector
+        
+        
         # Hard Inputs
         ocp.constraints.idxbu = np.array([0, 1, 2, 3])
-        ocp.constraints.lbu = np.array([-0.8, -0.8, -0.8, self.params['thrust_min']])
-        ocp.constraints.ubu = np.array([+0.8, +0.8, +0.8, self.params['thrust_max']])
+        ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, self.params['thrust_min'] * 4] )
+        ocp.constraints.ubu = np.array([+0.5, +0.5, +0.5, self.params['thrust_max'] * 4])
         
         # Soft State Bounds (Corridor) [cite: 305]
         # w1, w2 indices in x are 1 and 2
-        ocp.constraints.idxbx = np.array([1, 2])
-        ocp.constraints.lbx = np.array([-0.5, -0.5]) 
-        ocp.constraints.ubx = np.array([+0.5, +0.5])
+        ocp.constraints.idxbx = np.array([1, 2 , 6 , 7 , 8])  # w1, w2, phi, theta, psi
+        ocp.constraints.lbx = np.array([-0.3, -0.3 , -0.5, -0.5, -0.5]) 
+        ocp.constraints.ubx = np.array([+0.3, +0.3, +0.5, +0.5, +0.5])
         
         # Slack Config
         ns = 2
@@ -423,10 +430,12 @@ class SpatialMPC:
 # ==============================================================================
 
 class SpatialMPCController(Controller):
-    def __init__(self, obs: dict, info: dict, config: dict):
+    def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 4.0 # Target speed (aggressive)
+        self.v_target = 1.0 # Target speed (aggressive)
+        
+        self.env = env
         
         # 2. Geometry
         gates_list = config.get("env", {}).get("track", {}).get("gates", [])
@@ -451,26 +460,15 @@ class SpatialMPCController(Controller):
 
         self.reset_mpc_solver()
 
-    # def reset_mpc_solver(self):
-    #     """Warm starts the solver with a forward guess."""
-    #     nx = 12
-    #     hover_T = self.params['mass'] * self.params['g']
-        
-    #     for k in range(self.N_horizon + 1):
-    #         x_guess = np.zeros(nx)
-    #         # Guess forward progress
-    #         x_guess[0] = self.v_target * k * (self.mpc.Tf / self.N_horizon)
-    #         x_guess[3] = self.v_target # Target velocity
-            
-    #         self.mpc.solver.set(k, "x", x_guess)
-    #         if k < self.N_horizon:
-    #             self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
-        
-    #     self.prev_s = 0.0
-        
     def reset_mpc_solver(self):
+        """Warm starts the solver with a forward guess."""
         nx = 12
-        hover_T = self.params['mass'] * self.params['g'] / self.params['cmd_f_coef'] # Inverse calc for hover input
+        hover_T = self.params['mass'] * self.params['g']
+        mass = self.params['mass']
+        g = self.params['g']
+        acc_coef = self.params['acc_coef']
+        cmd_f_coef = self.params['cmd_f_coef']
+        hover_T = (mass * g - acc_coef) / cmd_f_coef
         
         for k in range(self.N_horizon + 1):
             x_guess = np.zeros(nx)
@@ -482,6 +480,10 @@ class SpatialMPCController(Controller):
             self.mpc.solver.set(k, "x", x_guess)
             if k < self.N_horizon:
                 self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
+        
+        self.prev_s = 0.0
+        
+    
 
     def compute_control(self, obs: dict, info: dict | None = None) -> np.ndarray:
         
@@ -489,9 +491,9 @@ class SpatialMPCController(Controller):
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
         
-        hover_T = self.params['mass'] * self.params['g']
+        hover_T = self.params['mass'] * -self.params['g']
         
-        # 1. State Feedback (World -> Spatial) [cite: 239-245]
+        # 1. State Feedback (World -> Spatial)
         x_spatial = self._cartesian_to_spatial(obs["pos"], obs["vel"], obs["rpy"], obs["drpy"])
         
         # Update current state constraint (x0)
@@ -505,6 +507,29 @@ class SpatialMPCController(Controller):
         
         # "Carrot" approach: Set target velocity high [cite: 586]
         target_vel = self.v_target 
+        
+        if self.env is not None:
+            try:
+                # 1. Get the points. 
+                # self.geo.pt_frame['pos'] contains the pre-calculated center line.
+                # We slice [::5] to reduce rendering load (draw every 5th point)
+                path_points = self.geo.pt_frame['pos'][::5]
+                
+                # 2. Draw the line
+                # Green color (R=0, G=1, B=0, Alpha=0.5)
+                draw_line(
+                    env=self.env,
+                    points=path_points,
+                    rgba=np.array([0.0, 1.0, 0.0, 0.5]), 
+                    min_size=2.0,
+                    max_size=2.0
+                )
+            except Exception as e:
+                # Catch errors to ensure the drone keeps flying even if drawing fails
+                if self.debug: 
+                    print(f"Vis Error: {e}")
+        # --- VISUALIZATION END ---
+
 
         for k in range(self.mpc.N):
             # A. Predict s for parameter lookup
@@ -527,6 +552,7 @@ class SpatialMPCController(Controller):
             y_ref = np.zeros(16)
             y_ref[0] = s_ref        # Target progress
             y_ref[3] = target_vel   # Target speed
+            # y_ref[3] = 0   # just hold zero speed for debugging
             y_ref[15] = hover_T     # Feedforward thrust
             
             self.mpc.solver.set(k, "yref", y_ref)
@@ -544,6 +570,10 @@ class SpatialMPCController(Controller):
         yref_e = np.zeros(12)
         yref_e[0] = s_end
         yref_e[3] = target_vel
+        # yref_e[3] = 0  # just hold zero speed for debugging
+        yref_e[11] = hover_T
+        
+        # print("desired thrust at end:", yref_e[11])
         self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
         # 4. Solve
@@ -558,6 +588,8 @@ class SpatialMPCController(Controller):
             
         # Log
         self._log_control_step(x_spatial, u_opt, status)
+        
+        print("actual thrust command:", u_opt[3], "desired hover thrust:", yref_e[11], "max thrust:", self.params['thrust_max'] * 4, "min thrust:", self.params['thrust_min'] * 4)
 
         # Return [roll, pitch, yaw, thrust]
         return np.array([u_opt[0], u_opt[1], u_opt[2], u_opt[3]])
@@ -579,7 +611,7 @@ class SpatialMPCController(Controller):
         # 4. Scaling Factor h
         h = 1 - f['k1'] * w1 - f['k2'] * w2
         # Safety clamp to avoid division by zero in tight loops
-        h = max(h, 0.1) 
+        h = max(h, 0.01) 
         
         # 5. Calculate Spatial Velocities
         ds = np.dot(vel, f['t']) / h
@@ -603,13 +635,18 @@ class SpatialMPCController(Controller):
 
     def episode_callback(self):
         """Called at the end of each episode. Generate plots here."""
-        if len(self.control_log['timestamps']) > 0:
-            self.plot_all_diagnostics()
+        # if len(self.control_log['timestamps']) > 0:
+        #     self.plot_all_diagnostics()
         return
 
     def _log_control_step(self, x_spatial: np.ndarray, u_opt: np.ndarray, solver_status: int):
         """Log control values and state for debugging."""
         self.step_count += 1
+        
+        # if(self.step_count % 10 == 0):
+        #     self.debug_plot_horizon()
+            
+        
         elapsed_time = (datetime.now() - self.episode_start_time).total_seconds()
         
         # Log data
@@ -747,12 +784,66 @@ class SpatialMPCController(Controller):
         plt.close()
         
         return save_path
+    
+    def debug_plot_horizon(self):
+        """Plots what the solver THINKS will happen over the next N steps."""
+        nx = 12
+        pred_x = []
+        pred_u = []
+        
+        # Fetch the open-loop prediction from Acados
+        for k in range(self.mpc.N + 1):
+            pred_x.append(self.mpc.solver.get(k, "x"))
+            if k < self.mpc.N:
+                pred_u.append(self.mpc.solver.get(k, "u"))
+        
+        pred_x = np.array(pred_x) # Shape (N+1, 12)
+        pred_u = np.array(pred_u) # Shape (N, 4)
+
+        # Plot
+        fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+        fig.suptitle(f"Solver Prediction at Step {self.step_count}")
+
+        # 1. Progress (s) & Velocity (ds)
+        axs[0,0].plot(pred_x[:, 0], label="Predicted s")
+        axs[0,0].plot(pred_x[:, 3], label="Predicted ds")
+        axs[0,0].set_title("Progress & Speed")
+        axs[0,0].legend()
+        axs[0,0].grid(True)
+
+        # 2. Corridor Errors (w1, w2)
+        axs[0,1].plot(pred_x[:, 1], label="w1 (Lat)")
+        axs[0,1].plot(pred_x[:, 2], label="w2 (Vert)")
+        axs[0,1].axhline(0.5, color='r', linestyle='--') # Bounds
+        axs[0,1].axhline(-0.5, color='r', linestyle='--')
+        axs[0,1].set_title("Corridor Deviation")
+        axs[0,1].legend()
+
+        # 3. Attitude (rpy)
+        axs[1,0].plot(pred_x[:, 6], label="Phi")
+        axs[1,0].plot(pred_x[:, 7], label="Theta")
+        axs[1,0].set_title("Predicted Attitude")
+        axs[1,0].legend()
+
+        # 4. Inputs (Thrust)
+        axs[1,1].step(range(len(pred_u)), pred_u[:, 3], label="Thrust Cmd")
+        axs[1,1].set_title("Planned Thrust")
+        axs[1,1].set_ylim(-0.1, 1.0) # Adjust to your thrust scale
+        axs[1,1].legend()
+
+        plt.tight_layout()
+        # os.makedirs("debug_plots", exist_ok=True)
+        dir_path = f"mpc_debug/mpc_diagnostics_{self.episode_start_time.strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(dir_path, exist_ok=True)
+        
+        plt.savefig(f"{dir_path}/horizon_{self.step_count:04d}.png")
+        plt.close()
 
     def plot_all_diagnostics(self, save_dir: str = None):
         """Generate all diagnostic plots at once."""
         if save_dir is None:
             timestamp = self.episode_start_time.strftime("%Y%m%d_%H%M%S")
-            save_dir = f"mpc_diagnostics_{timestamp}"
+            save_dir = f"mpc_debug/mpc_diagnostics_{timestamp}"
         
         os.makedirs(save_dir, exist_ok=True)
         

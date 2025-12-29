@@ -193,7 +193,7 @@ def create_ocp_solver(
 class AttitudeMPC(Controller):
     """Example of a MPC using the collective thrust and attitude interface."""
 
-    def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict):
+    def __init__(self, obs: dict[str, NDArray[np.floating]], info: dict, config: dict, env=None):
         """Initialize the attitude controller.
 
         Args:
@@ -201,6 +201,7 @@ class AttitudeMPC(Controller):
                 observation space for details.
             info: Additional environment information from the reset.
             config: The configuration of the environment.
+            env: The environment instance.
         """
         super().__init__(obs, info, config)
         self._N = 25
@@ -322,6 +323,8 @@ class AttitudeMPC(Controller):
         # set thrust reference to hover thrust
         yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
         
+        # print("desired thrust:", yref[0, 15], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
+        
         # Note: roll, pitch and yaw are all 0 always
         
         # Apply references to the solver from stage 0 to N-1
@@ -347,6 +350,14 @@ class AttitudeMPC(Controller):
         
         # returns the optimal control input at stage 0
         u0 = self._acados_ocp_solver.get(0, "u")
+        
+        # print(f"MPC step {self._tick}, desired pos: {self._waypoints_pos[i]}, current pos: {obs['pos']}, u0: {u0}")
+        
+        # if self._tick % 10 == 0:
+        #     print("thrust:", u0[3], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
+        
+        if self._tick % 20 == 0:
+            print("actual thrust:", u0[3], " desired thrust:", yref[0, 15], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
 
         return u0
 
