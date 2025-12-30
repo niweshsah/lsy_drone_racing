@@ -18,18 +18,20 @@ class GeometryEngine:
         # -----------------------------------------------------------
 
         # 1. Setup Waypoints
-        self.waypoints = np.vstack((self.start_pos, self.gates_pos))
+        # self.waypoints = np.vstack((self.start_pos, self.gates_pos))
         
-        # 2. Compute "Smart" Tangents 
-        # (Fixes loops and sharp turns by blending normals)
-        self.tangents = self._compute_smoothed_tangents(blend_strength=0.9)
+        # # 2. Compute "Smart" Tangents 
+        # # (Fixes loops and sharp turns by blending normals)
+        # self.tangents = self._compute_smoothed_tangents(blend_strength=0.9)
 
-        # 3. Spline Generation (Chord-length parameterization)
-        dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
-        self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
-        self.total_length = self.s_knots[-1]
+        # # 3. Spline Generation (Chord-length parameterization)
+        # dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
+        # self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
+        # self.total_length = self.s_knots[-1]
         
-        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
+        # self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
+        
+        
 
         # 4. Compute Parallel Transport Frame
         self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)

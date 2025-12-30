@@ -3,6 +3,7 @@ import os
 import shutil
 from datetime import datetime
 from multiprocessing import Array
+from typing import List
 
 import casadi as ca
 import matplotlib
@@ -182,77 +183,176 @@ def export_model(params: dict) -> AcadosModel:
 # ==============================================================================
 
 class GeometryEngine:
-    def __init__(self, gates_pos, gates_normals,  start_pos):
+    def __init__(
+        self, 
+        gates_pos: List[List[float]], 
+        gates_normals: List[List[float]], 
+        start_pos: List[float]
+    ):
+        """
+        Initializes the geometry engine and generates the safe flight path.
+        """
+        # --- 1. Configuration Constants ---
+        self.DETOUR_ANGLE_THRESHOLD = 60.0  # Degrees. If turn > this, add detour.
+        self.DETOUR_RADIUS = 0.5            # Meters. How far to swing out for detours.
+        self.TANGENT_SCALE_FACTOR = 1.0     # Controls how "aggressive" the curves are.
+
+        # --- 2. Data Ingestion ---
         self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
         self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
         # self.gate_y = np.asarray(gates_y, dtype=np.float64)
         # self.gate_z = np.asarray(gates_z, dtype=np.float64)
         # self.obstacles_pos = np.asarray(obstacles_pos, dtype=np.float64)
         self.start_pos = np.asarray(start_pos, dtype=np.float64)
-        # -----------------------------------------------------------
 
-        # 1. Setup Waypoints
-        self.waypoints = np.vstack((self.start_pos, self.gates_pos))
+        # --- 3. Pipeline Execution ---
         
-        # 2. Compute "Smart" Tangents 
-        # (Fixes loops and sharp turns by blending normals)
-        self.tangents = self._compute_smoothed_tangents(blend_strength=0.4)
+        # A. Initialize Waypoints (Start + Gates)
+        # We track 'types': 0=Start, 1=Gate, 2=Detour
+        self.waypoints, self.wp_types, self.wp_normals = self._initialize_waypoints()
 
-        # 3. Spline Generation (Chord-length parameterization)
+        # B. Insert Detour Points for Sharp Turns
+        self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
+            self.waypoints, self.wp_types, self.wp_normals
+        )
+
+        # C. Compute Tangents (Strict constraints for Gates, Smooth for others)
+        self.tangents = self._compute_hermite_tangents()
+
+        # D. Generate Cubic Hermite Spline
+        # Parameterize by cumulative Euclidean distance (Arc Length approximation)
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
         self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
         self.total_length = self.s_knots[-1]
         
+        # P(s) -> Returns (x,y,z)
         self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
 
-        # 4. Compute Parallel Transport Frame
+        # E. Generate Parallel Transport Frame (for visualization/physics)
         self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)
 
-    def _compute_smoothed_tangents(self, blend_strength=0.4):  # noqa: ANN202
-        n_points = len(self.waypoints)
+    def _initialize_waypoints(self):
+        """Creates the initial ordered list of waypoints starting with Start Pos."""
+        wps = [self.start_pos]
+        types = [0]             # 0 = Start
+        normals = [np.zeros(3)] # Start has no forced orientation
+        
+        for i in range(len(self.gates_pos)):
+            wps.append(self.gates_pos[i])
+            types.append(1)     # 1 = Gate
+            normals.append(self.gate_normals[i])
+            
+        return np.array(wps), np.array(types), np.array(normals)
+
+    def _add_detour_logic(self, wps, types, normals):
+        """
+        Analyzes consecutive waypoints. If the angle required to hit the next point
+        is too sharp relative to the current gate's normal, inserts a detour point.
+        """
+        new_wps = [wps[0]]
+        new_types = [types[0]]
+        new_normals = [normals[0]]
+
+        for i in range(len(wps) - 1):
+            curr_p = wps[i]
+            next_p = wps[i+1]
+            curr_type = types[i]
+            
+            # Only apply detour logic if we are LEAVING a GATE (Type 1)
+            if curr_type == 1: 
+                # Identify which gate index this corresponds to in original arrays
+                # (Since wps includes start, gate index is i-1)
+                gate_idx = i - 1 
+                gate_norm = self.gate_normals[gate_idx]
+                
+                vec_to_next = next_p - curr_p
+                dist = np.linalg.norm(vec_to_next)
+                
+                if dist > 1e-6:
+                    vec_to_next /= dist
+                    
+                    # Dot product: 1.0 (Straight), 0.0 (90 deg), -1.0 (180 deg)
+                    alignment = np.dot(gate_norm, vec_to_next)
+                    # Convert to angle
+                    angle_deg = np.degrees(np.arccos(np.clip(alignment, -1.0, 1.0)))
+
+                    if angle_deg > self.DETOUR_ANGLE_THRESHOLD:
+                        # --- Create Detour ---
+                        # Project vector onto the Gate's Plane (Y-Z plane) to find "sideways" direction
+                        # Formula: v_proj = v - (v . n) * n
+                        proj = vec_to_next - (np.dot(vec_to_next, gate_norm) * gate_norm)
+                        
+                        if np.linalg.norm(proj) < 1e-3:
+                            # Perfectly backwards (180 deg). Default to "Up" relative to gate
+                            detour_dir = self.gate_z[gate_idx]
+                        else:
+                            detour_dir = proj / np.linalg.norm(proj)
+                        
+                        # Place detour point:
+                        # 1. Start at gate center
+                        # 2. Move 'out' by radius
+                        # 3. Move 'forward' slightly along normal so we don't clip the frame
+                        detour_pos = curr_p + (detour_dir * self.DETOUR_RADIUS) + (gate_norm * 1.5)
+                        
+                        new_wps.append(detour_pos)
+                        new_types.append(2) # 2 = Detour
+                        new_normals.append(np.zeros(3)) # No forced normal
+
+            # Always add the target point
+            new_wps.append(next_p)
+            new_types.append(types[i+1])
+            new_normals.append(normals[i+1])
+
+        return np.array(new_wps), np.array(new_types), np.array(new_normals)
+
+    def _compute_hermite_tangents(self):
+        """
+        Calculates the tangent (velocity) vectors for the Cubic Hermite Spline.
+        - Gates: Tangent MUST be aligned with Gate Normal.
+        - Detours/Start: Tangent is heuristic (Catmull-Rom / Finite Difference).
+        """
+        num_pts = len(self.waypoints)
         tangents = np.zeros_like(self.waypoints)
 
-        # --- A. Start Tangent ---
-        start_dir = self.waypoints[1] - self.waypoints[0]
-        tangents[0] = start_dir / np.linalg.norm(start_dir)
-
-        # --- B. Gate Tangents ---
-        for i in range(1, n_points):
-            curr_p = self.waypoints[i]
-            prev_p = self.waypoints[i-1]
+        for i in range(num_pts):
+            # 1. Determine Scale (Speed) based on segment lengths
+            #    We want the drone to move faster on long segments, slower on short ones.
+            dist_prev = np.linalg.norm(self.waypoints[i] - self.waypoints[i-1]) if i > 0 else 0
+            dist_next = np.linalg.norm(self.waypoints[i+1] - self.waypoints[i]) if i < num_pts - 1 else 0
             
-            # Vector arriving at current gate
-            v_in = curr_p - prev_p
-            if np.linalg.norm(v_in) > 1e-6: v_in /= np.linalg.norm(v_in)
+            # Use minimum neighbor distance to prevent loops/overshoot
+            base_scale = min(dist_prev if dist_prev > 0 else dist_next, 
+                             dist_next if dist_next > 0 else dist_prev)
             
-            # Vector leaving current gate
-            if i < n_points - 1:
-                next_p = self.waypoints[i+1]
-                v_out = next_p - curr_p
-                if np.linalg.norm(v_out) > 1e-6: v_out /= np.linalg.norm(v_out)
+            scale = base_scale * self.TANGENT_SCALE_FACTOR
+
+            if self.wp_types[i] == 1: 
+                # --- GATE: Strict Alignment ---
+                normal = self.wp_normals[i].copy()
+                
+                # Auto-Flip: If the natural path flow opposes the normal, flip the normal
+                # This handles gates defined "backwards" in the config
+                if i > 0 and i < num_pts - 1:
+                    flow_vec = self.waypoints[i+1] - self.waypoints[i-1]
+                    if np.dot(normal, flow_vec) < 0:
+                        normal = -normal
+                
+                tangents[i] = normal * scale
+
             else:
-                v_out = v_in 
-
-            # 1. Compute "Natural" Flow
-            t_natural = v_in + v_out
-            if np.linalg.norm(t_natural) > 1e-6:
-                t_natural /= np.linalg.norm(t_natural)
-            else:
-                t_natural = v_in 
-
-            # 2. Get Strict Gate Normal
-            gate_idx = i - 1
-            t_strict = self.gate_normals[gate_idx].copy()
-
-            # 3. AUTO-FLIP Check
-            if np.dot(t_strict, t_natural) < 0:
-                t_strict = -t_strict
-                self.gate_normals[gate_idx] = t_strict
-
-            # 4. Blend
-            t_final = (blend_strength * t_strict) + ((1 - blend_strength) * t_natural)
-            t_final /= np.linalg.norm(t_final)
-            tangents[i] = t_final
+                # --- START / DETOUR: Smooth Curve ---
+                # Use Catmull-Rom style (vector between prev and next)
+                if i == 0:
+                    t = self.waypoints[i+1] - self.waypoints[i]
+                elif i == num_pts - 1:
+                    t = self.waypoints[i] - self.waypoints[i-1]
+                else:
+                    t = self.waypoints[i+1] - self.waypoints[i-1]
+                
+                if np.linalg.norm(t) > 1e-6:
+                    t = t / np.linalg.norm(t)
+                
+                tangents[i] = t * scale
 
         return tangents
         
@@ -477,7 +577,7 @@ class SpatialMPCController(Controller):
     def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 1.5 # Target speed
+        self.v_target = 2 # Target speed
         
         self.env = env
         
@@ -615,7 +715,8 @@ class SpatialMPCController(Controller):
             # if k_mag >= 1:
             #     v_ref_k = v_corner
                 
-            v_ref_k = min(v_corner, target_vel)
+            # v_ref_k = min(v_corner, target_vel)
+            v_ref_k = target_vel
         
             # print(f"Step {k}, s_pred: {s_pred:.2f}, k_mag: {k_mag:.3f}, v_corner: {v_corner:.3f}, v_ref_k: {v_ref_k:.3f}")
             

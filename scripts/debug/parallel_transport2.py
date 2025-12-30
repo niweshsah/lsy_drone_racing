@@ -22,7 +22,7 @@ class GeometryEngine:
         
         # 2. Compute "Smart" Tangents 
         # (Fixes loops and sharp turns by blending normals)
-        self.tangents = self._compute_smoothed_tangents(blend_strength=0.9)
+        self.tangents = self._compute_smoothed_tangents(blend_strength=0.4)
 
         # 3. Spline Generation (Chord-length parameterization)
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
@@ -280,7 +280,7 @@ def load_from_toml(filepath: str):
 
 if __name__ == "__main__":
     # 1. Try to load file, otherwise use dummy data
-    toml_path = "config/level1_noObstacle.toml" 
+    toml_path = "config/level1.toml" 
     
     if os.path.exists(toml_path):
         try:
