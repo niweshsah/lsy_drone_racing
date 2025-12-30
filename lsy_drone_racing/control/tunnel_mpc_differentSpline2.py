@@ -22,6 +22,11 @@ from lsy_drone_racing.utils.utils import draw_line
 # Use non-interactive backend for saving plots
 matplotlib.use('Agg')
 
+# Parameters:
+v_max_ref = 2.1  # m/s
+corner_acc = 1.95
+mpc_horizons_global = 150
+
 # ==============================================================================
 # 1. PARAMETERS & DYNAMICS
 # ==============================================================================
@@ -116,7 +121,7 @@ def symbolic_dynamics_spatial(
         ca.horzcat(-sy,                cy*sx,              cx*cy)
     )
 
-    # Global Acceleration [cite: 166]
+    # Global Acceleration
     g_vec_sym = ca.DM(gravity_vec)
     acc_world = g_vec_sym + (R_IB @ F_body) / mass
 
@@ -194,8 +199,8 @@ class GeometryEngine:
         """
         # --- 1. Configuration Constants ---
         self.DETOUR_ANGLE_THRESHOLD = 60.0  # Degrees. If turn > this, add detour.
-        self.DETOUR_RADIUS = 0.5            # Meters. How far to swing out for detours.
-        self.TANGENT_SCALE_FACTOR = 1.0     # Controls how "aggressive" the curves are.
+        self.DETOUR_RADIUS = 0.3            # Meters. How far to swing out for detours.
+        self.TANGENT_SCALE_FACTOR = 1     # Controls how "aggressive" the curves are.
 
         # --- 2. Data Ingestion ---
         self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
@@ -535,8 +540,8 @@ class SpatialMPC:
         # Soft State Bounds (Corridor)
         # w1, w2 indices in x are 1 and 2
         ocp.constraints.idxbx = np.array([1, 2 , 6 , 7 , 8])  # w1, w2, phi, theta, psi
-        ocp.constraints.lbx = np.array([-0.2, -0.2 , -0.5, -0.5, -0.5]) 
-        ocp.constraints.ubx = np.array([+0.2, +0.2, +0.5, +0.5, +0.5])
+        ocp.constraints.lbx = np.array([-0.4, -0.4 , -0.5, -0.5, -0.5]) 
+        ocp.constraints.ubx = np.array([+0.4, +0.4, +0.5, +0.5, +0.5])
         
         # Slack Config
         ns = 2
@@ -577,7 +582,7 @@ class SpatialMPCController(Controller):
     def __init__(self, obs: dict, info: dict, config: dict, env=None):
         # 1. Setup
         self.params = get_drone_params()
-        self.v_target = 2 # Target speed
+        self.v_target = v_max_ref # Target speed
         
         self.env = env
         
@@ -595,7 +600,7 @@ class SpatialMPCController(Controller):
         self.geo = GeometryEngine(gates_pos, gates_normals , start_pos)
         
         # 3. Solver
-        self.N_horizon = 50
+        self.N_horizon = mpc_horizons_global
         self.mpc = SpatialMPC(self.params, N=self.N_horizon, Tf=1.0)
         
         # 4. State
@@ -691,7 +696,7 @@ class SpatialMPCController(Controller):
         # Max lateral accel (tuning parameter): 
         # 9.8 * tan(30 deg) ~= 5.7
         # 9.8 * tan(45 deg) ~= 9.8
-        max_lat_acc = 1.5 
+        max_lat_acc = corner_acc # this is the global variable defined outside the class 
         epsilon = 0.01 # Avoid div by zero
 
         for k in range(self.mpc.N):
@@ -715,8 +720,8 @@ class SpatialMPCController(Controller):
             # if k_mag >= 1:
             #     v_ref_k = v_corner
                 
-            # v_ref_k = min(v_corner, target_vel)
-            v_ref_k = target_vel
+            v_ref_k = min(v_corner, target_vel)
+            # v_ref_k = target_vel
         
             # print(f"Step {k}, s_pred: {s_pred:.2f}, k_mag: {k_mag:.3f}, v_corner: {v_corner:.3f}, v_ref_k: {v_ref_k:.3f}")
             
