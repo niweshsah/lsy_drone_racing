@@ -39,8 +39,8 @@ CONSTANTS = {
     "v_max_ref": 1.5,           # m/s
     "corner_acc": 1.95,         # m/s^2
     "mpc_horizon": 50,          # Steps
-    "max_lateral_width": 0.26,  # m (Static Corridor width)
-    "safety_radius": 0.06,      # m (Obstacle buffer - Increased slightly for safety)
+    "max_lateral_width": 0.35,  # m (Corridor width)
+    "safety_radius": 0.15,      # m (Obstacle radius + Drone radius buffer)
     "tf_horizon": 1.0           # s
 }
 
@@ -154,10 +154,14 @@ def export_model(params: Dict[str, Any]) -> AcadosModel:
 # ==============================================================================
 
 class GeometryEngine:
-    def __init__(self, gates_pos, gates_normals, start_pos):
+    def __init__(self, gates_pos, gates_normals, start_pos, obstacles_pos, safety_radius):
         self.DETOUR_ANGLE_THRESHOLD = 60.0
         self.DETOUR_RADIUS = 0.3
         self.TANGENT_SCALE_FACTOR = 1.0
+
+        # Store obstacles for offline generation
+        self.obstacles_pos = np.asarray(obstacles_pos)
+        self.safety_radius = safety_radius
 
         self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
         self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
@@ -173,7 +177,12 @@ class GeometryEngine:
         self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
         self.total_length = self.s_knots[-1]
         self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
-        self.pt_frame = self._generate_parallel_transport_frame(num_points=1000)
+        
+        # Initialize PT frame with high resolution for offline bounds checking
+        self.pt_frame = self._generate_parallel_transport_frame(num_points=int(self.total_length * 100)) # ~1cm resolution
+        
+        # --- NEW: Generate Bounds Offline ---
+        self.corridor_map = self._generate_static_corridor()
 
     def _initialize_waypoints(self):
         wps = [self.start_pos]
@@ -280,6 +289,78 @@ class GeometryEngine:
             if isinstance(frames[k], list): frames[k] = np.array(frames[k])
         return frames
 
+    def _generate_static_corridor(self):
+        """
+        OFFLINE CALCULATIONS:
+        Generates lb_w1 and ub_w1 arrays for the entire track length based on obstacles.
+        Assuming obstacles are straight poles (affecting w1/lateral only).
+        """
+        print("[Geometry] Pre-computing static corridor bounds...")
+        num_pts = len(self.pt_frame['s'])
+        
+        # Initialize with max corridor width
+        w_max = CONSTANTS["max_lateral_width"]
+        lb_w1 = np.full(num_pts, -w_max)
+        ub_w1 = np.full(num_pts, w_max)
+        
+        if len(self.obstacles_pos) == 0:
+            return {"lb_w1": lb_w1, "ub_w1": ub_w1}
+
+        # Iterate through every point on the path
+        for i in range(num_pts):
+            frame_pos = self.pt_frame['pos'][i]
+            frame_n1 = self.pt_frame['n1'][i]
+            
+            # Check all obstacles
+            for obs in self.obstacles_pos:
+                # Vector from path point to obstacle
+                r_vec = obs - frame_pos
+                
+                # Project obstacle onto n1 (lateral distance)
+                w1_obs = np.dot(r_vec, frame_n1)
+                
+                # Check distance (cylinder check)
+                # Distance squared in 3D
+                dist_sq = np.sum(r_vec**2)
+                
+                # Distance squared perpendicular to n1 (to check if it's "at this slice" of the path)
+                # Actually, for a pole, we care about the projection on the n1-n2 plane (cross section)
+                # But since we iterate s, we check if the obstacle is close to this path point
+                
+                # Simple check: Is the obstacle close enough to influence bounds?
+                # We use a loose threshold to catch the pole
+                if dist_sq < (self.safety_radius + w_max + 0.5)**2:
+                    
+                    # Logic: If pole is on the left (positive w1), it brings down the Upper Bound
+                    if w1_obs > 0:
+                        safe_edge = w1_obs - self.safety_radius
+                        if safe_edge < ub_w1[i]:
+                            ub_w1[i] = safe_edge
+                    
+                    # If pole is on the right (negative w1), it brings up the Lower Bound
+                    else:
+                        safe_edge = w1_obs + self.safety_radius
+                        if safe_edge > lb_w1[i]:
+                            lb_w1[i] = safe_edge
+
+        # Cleanup: Ensure bounds are valid (lb < ub). If not, path is blocked.
+        collapsed = lb_w1 >= ub_w1
+        if np.any(collapsed):
+            print(f"[Geometry] WARNING: Corridor collapsed at {np.sum(collapsed)} points.")
+            # Emergency fix: force a tiny 10cm gap
+            mid = (lb_w1[collapsed] + ub_w1[collapsed]) / 2
+            lb_w1[collapsed] = mid - 0.05
+            ub_w1[collapsed] = mid + 0.05
+            
+        print("[Geometry] Corridor generation complete.")
+        return {"lb_w1": lb_w1, "ub_w1": ub_w1}
+
+    def get_static_bounds(self, s_query):
+        """Lookup pre-computed bounds for a given s"""
+        idx = np.searchsorted(self.pt_frame['s'], s_query)
+        idx = np.clip(idx, 0, len(self.pt_frame['s'])-1)
+        return self.corridor_map['lb_w1'][idx], self.corridor_map['ub_w1'][idx]
+
     def get_frame(self, s_query):
         idx = np.searchsorted(self.pt_frame['s'], s_query) - 1
         idx = np.clip(idx, 0, len(self.pt_frame['s'])-1)
@@ -366,9 +447,9 @@ class SpatialMPCController(Controller):
         self.env = env
         self.OBS_RADIUS = CONSTANTS["safety_radius"]
         self.W1_MAX = CONSTANTS["max_lateral_width"]
-        self.W2_MAX = CONSTANTS["max_lateral_width"]
+        self.W2_MAX = CONSTANTS["max_lateral_width"] # assuming square corridor for w2
         
-        # --- DEBUG: Obstacle Loading ---
+        # --- LOAD OBSTACLES ---
         raw_obstacles = config.get("env", {}).get("track", {}).get("obstacles", [])
         if not raw_obstacles and "obstacles" in info:
             raw_obstacles = info["obstacles"]
@@ -379,17 +460,22 @@ class SpatialMPCController(Controller):
             elif isinstance(o, (list, np.ndarray)): self.obstacles_pos.append(np.array(o))
             elif isinstance(o, dict): self.obstacles_pos.append(np.array(list(o.values())))
         
-        print(f"\n[INIT] DEBUG: Loaded {len(self.obstacles_pos)} obstacles.")
-        for i, o in enumerate(self.obstacles_pos):
-            print(f"   Obs {i}: {o}")
-        print("--------------------------------------------------\n")
+        print(f"\n[INIT] Loaded {len(self.obstacles_pos)} obstacles.")
 
         gates_list = config.get("env", {}).get("track", {}).get("gates", [])
         if not gates_list and "gates" in info: gates_list = info["gates"]
         gates_pos = [g["pos"] for g in gates_list]
         gates_normals = self._get_gate_normals(obs['gates_quat'])
         
-        self.geo = GeometryEngine(gates_pos, gates_normals , obs["pos"])
+        # --- INITIALIZE GEOMETRY WITH OFFLINE CORRIDOR GENERATION ---
+        self.geo = GeometryEngine(
+            gates_pos, 
+            gates_normals, 
+            obs["pos"], 
+            self.obstacles_pos,
+            self.OBS_RADIUS
+        )
+        
         self.N_horizon = CONSTANTS["mpc_horizon"]
         self.mpc = SpatialMPC(self.params, N=self.N_horizon, Tf=CONSTANTS["tf_horizon"])
         
@@ -405,69 +491,49 @@ class SpatialMPCController(Controller):
         self.global_viz_right  = self.global_viz_center - (self.W1_MAX * self.geo.pt_frame['n1'][::subsample])
 
         self.reset_mpc_solver()
+        
+        
+    def _draw_static_corridor(self):
+        """
+        Draws the full pre-computed corridor boundaries in the simulation.
+        Call this once after initialization or periodically if needed.
+        """
+        if self.env is None: return
+
+        # Extract pre-computed data
+        # FIXED: Increased step to 40 to avoid "Ran out of geoms" error
+        step = 10 
+        positions = self.geo.pt_frame['pos'][::step]
+        n1_vecs = self.geo.pt_frame['n1'][::step]
+        
+        # Get bounds for these specific indices
+        full_indices = np.arange(0, len(self.geo.pt_frame['s']), step)
+        
+        lb_w1 = self.geo.corridor_map['lb_w1'][full_indices]
+        ub_w1 = self.geo.corridor_map['ub_w1'][full_indices]
+
+        # Calculate Boundary Points
+        left_bound_pts = positions + (n1_vecs * ub_w1[:, np.newaxis])
+        right_bound_pts = positions + (n1_vecs * lb_w1[:, np.newaxis])
+
+        # Draw Lines
+        try:
+            draw_line(self.env, points=left_bound_pts, rgba=np.array([1.0, 0.65, 0.0, 0.5]))
+            draw_line(self.env, points=right_bound_pts, rgba=np.array([1.0, 0.65, 0.0, 0.5]))
+            
+            # FIXED: Commented out centerline to save geom resources
+            # draw_line(self.env, points=positions, rgba=np.array([0.0, 1.0, 0.0, 0.3]))
+        except Exception as e:
+            print(f"Visualization Error: {e}")
     
     def _draw_global_track(self):
         if self.env is None: return
         try:
             draw_line(self.env, points=self.global_viz_center, rgba=np.array([0.0, 1.0, 0.0, 0.5]))
-            draw_line(self.env, points=self.global_viz_left, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
-            draw_line(self.env, points=self.global_viz_right, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
+            # draw_line(self.env, points=self.global_viz_left, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
+            # draw_line(self.env, points=self.global_viz_right, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
         except Exception: pass
 
-    def _compute_corridor_bounds(self, s_pred, frame_pos, frame_t, frame_n1, frame_n2, debug_print=False):
-        """
-        Computes dynamic [lb, ub] for w1 and w2.
-        Includes extensive debugging logic to track why obstacles might be ignored.
-        """
-        lb_w1, ub_w1 = -self.W1_MAX, self.W1_MAX
-        lb_w2, ub_w2 = -self.W2_MAX, self.W2_MAX
-        
-        # Increased threshold to catch obstacles earlier
-        longitudinal_threshold = 2.0 
-
-        for i, obs_pos in enumerate(self.obstacles_pos):
-            r_vec = obs_pos - frame_pos
-            s_dist = np.dot(r_vec, frame_t)
-            
-            # --- DEBUG BLOCK START ---
-            if debug_print and abs(s_dist) < 5.0:
-                print(f"   [CHECK] Obs {i} | s_dist: {s_dist:.2f} | s_pred: {s_pred:.2f}")
-            # --- DEBUG BLOCK END ---
-            
-            if abs(s_dist) < longitudinal_threshold:
-                w1_obs = np.dot(r_vec, frame_n1)
-                w2_obs = np.dot(r_vec, frame_n2)
-                
-                # --- FIXED LOGIC: Overlap Check ---
-                # Check if obstacle (with radius) overlaps with current bounds
-                # We add OBS_RADIUS to the bounds to see if the obstacle's edge is inside
-                overlap_w1 = (lb_w1 - self.OBS_RADIUS < w1_obs < ub_w1 + self.OBS_RADIUS)
-                overlap_w2 = (lb_w2 - self.OBS_RADIUS < w2_obs < ub_w2 + self.OBS_RADIUS)
-                
-                if debug_print:
-                    print(f"      -> w1_obs: {w1_obs:.3f}, w2_obs: {w2_obs:.3f}")
-                    print(f"      -> Overlap Check: w1={overlap_w1}, w2={overlap_w2}")
-
-                if overlap_w1 or overlap_w2:
-                    if w1_obs > 0:
-                        # Obstacle on Left -> Trim UB
-                        dist_to_surface = w1_obs - self.OBS_RADIUS
-                        ub_w1 = min(ub_w1, dist_to_surface)
-                        if debug_print: print(f"      -> TRIMMED UPPER: New ub_w1 = {ub_w1:.3f}")
-                    else:
-                        # Obstacle on Right -> Trim LB
-                        dist_to_surface = w1_obs + self.OBS_RADIUS
-                        lb_w1 = max(lb_w1, dist_to_surface)
-                        if debug_print: print(f"      -> TRIMMED LOWER: New lb_w1 = {lb_w1:.3f}")
-
-        if lb_w1 >= ub_w1:
-            mid = (lb_w1 + ub_w1) / 2
-            lb_w1 = mid - 0.05
-            ub_w1 = mid + 0.05
-            if debug_print: print("      -> WARNING: GAP CLOSED. Resetting to narrow passage.")
-
-        return np.array([lb_w1, lb_w2]), np.array([ub_w1, ub_w2])
-        
     def _get_gate_normals(self, gates_quaternions):
         rotations = R.from_quat(gates_quaternions)
         return rotations.as_matrix()[:, :, 0]
@@ -486,12 +552,15 @@ class SpatialMPCController(Controller):
 
     def compute_control(self, obs: Dict, info: Optional[Dict] = None) -> np.ndarray:
         self._draw_global_track()
+        self._draw_static_corridor()
         
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
         
+        # Hard bounds for Angles and w2
         ANGLE_LB = np.array([-0.5, -0.5, -0.5])
         ANGLE_UB = np.array([0.5, 0.5, 0.5])
+        
         hover_T = self.params['mass'] * -self.params['g']
         
         x_spatial = self._cartesian_to_spatial(obs["pos"], obs["vel"], obs["rpy"], obs["drpy"])
@@ -507,29 +576,27 @@ class SpatialMPCController(Controller):
         epsilon = 0.01 
         vis_dynamic_left, vis_dynamic_right = [], []
 
-        # --- DEBUG FLAG ---
-        # Only print debug info for the FIRST predicted step (k=0) 
-        # and only every 20 control steps to avoid spamming.
-        do_debug = (self.step_count % 20 == 0)
-        if do_debug:
-            print(f"\n[STEP {self.step_count}] Computing Control for s={curr_s:.2f}")
-
         for k in range(self.mpc.N):
             s_pred = curr_s + k * max(curr_ds, 1.0) * dt 
+            
+            # --- UPDATED: OFFLINE LOOKUP ---
+            # Instead of computing geometry here, we just lookup.
+            lb_w1, ub_w1 = self.geo.get_static_bounds(s_pred)
+            # w2 is fixed to default width
+            lb_w2, ub_w2 = -self.W2_MAX, self.W2_MAX
+            
             f = self.geo.get_frame(s_pred)
             
-            # Pass debug flag only for k=0
-            w_lb, w_ub = self._compute_corridor_bounds(
-                s_pred, f['pos'], f['t'], f['n1'], f['n2'], 
-                debug_print=(do_debug and k == 0)
-            )
-            
-            vis_dynamic_left.append(f['pos'] + w_ub[0] * f['n1'])
-            vis_dynamic_right.append(f['pos'] + w_lb[0] * f['n1'])
+            # Visualization logic
+            vis_dynamic_left.append(f['pos'] + ub_w1 * f['n1'])
+            vis_dynamic_right.append(f['pos'] + lb_w1 * f['n1'])
             
             if k > 0:
-                self.mpc.solver.set(k, "lbx", np.concatenate([w_lb, ANGLE_LB]))
-                self.mpc.solver.set(k, "ubx", np.concatenate([w_ub, ANGLE_UB]))
+                # bounds: [w1, w2, phi, theta, psi] based on idxbx in build_solver
+                lbx = np.array([lb_w1, lb_w2, -0.5, -0.5, -0.5])
+                ubx = np.array([ub_w1, ub_w2, 0.5, 0.5, 0.5])
+                self.mpc.solver.set(k, "lbx", lbx)
+                self.mpc.solver.set(k, "ubx", ubx)
             
             k_mag = np.sqrt(f['k1']**2 + f['k2']**2)
             v_corner = np.sqrt(max_lat_acc / (k_mag + epsilon))
@@ -545,9 +612,14 @@ class SpatialMPCController(Controller):
         f_end = self.geo.get_frame(s_end)
         p_end = np.concatenate([f_end['t'], f_end['n1'], f_end['n2'], [f_end['k1']], [f_end['k2']], [f_end['dk1']], [f_end['dk2']]])
         self.mpc.solver.set(self.mpc.N, "p", p_end)
-        w_lb_e, w_ub_e = self._compute_corridor_bounds(s_end, f_end['pos'], f_end['t'], f_end['n1'], f_end['n2'])
-        self.mpc.solver.set(self.mpc.N, "lbx", np.concatenate([w_lb_e, ANGLE_LB]))
-        self.mpc.solver.set(self.mpc.N, "ubx", np.concatenate([w_ub_e, ANGLE_UB]))
+        
+        # Terminal bounds lookup
+        lb_w1_e, ub_w1_e = self.geo.get_static_bounds(s_end)
+        lbx_e = np.array([lb_w1_e, -self.W2_MAX, -0.5, -0.5, -0.5])
+        ubx_e = np.array([ub_w1_e, self.W2_MAX, 0.5, 0.5, 0.5])
+        self.mpc.solver.set(self.mpc.N, "lbx", lbx_e)
+        self.mpc.solver.set(self.mpc.N, "ubx", ubx_e)
+        
         yref_e = np.zeros(12); yref_e[0] = s_end; yref_e[3] = v_ref_k; yref_e[11] = hover_T
         self.mpc.solver.set(self.mpc.N, "yref", yref_e)
 
