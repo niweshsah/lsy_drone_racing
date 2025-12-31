@@ -33,6 +33,9 @@ class GeometryEngine:
         self.SAFETY_RADIUS = 0.05           # Meters (Pole radius + Drone buffer).
         self.POLE_HEIGHT = 2.0              # Meters (For visualization).
 
+        # --- Debug Storage ---
+        self.debug_vectors = []             # Stores (start, end) tuples for visualization
+
         # --- 2. Data Ingestion ---
         self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
         self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
@@ -61,7 +64,6 @@ class GeometryEngine:
         self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
 
         # E. Generate Parallel Transport Frame (High resolution for bounds checking)
-        # We use a higher resolution here (e.g., 1cm step) to ensure we catch obstacles accurately.
         num_frame_points = int(self.total_length * 100) 
         self.pt_frame = self._generate_parallel_transport_frame(num_points=num_frame_points)
 
@@ -196,10 +198,9 @@ class GeometryEngine:
 
     def _generate_static_corridor(self) -> Dict[str, NDArray]:
         """
-        Calculates safe corridor bounds (w1) by strictly checking if obstacles 
-        intersect the current cross-sectional plane of the path.
+        Calculates safe corridor bounds (w1) with strict 3D bounds checking.
         """
-        print("[Geometry] Generating static flight corridor bounds...")
+        print(f"[Geometry] Generating bounds. Safety Radius: {self.SAFETY_RADIUS}")
         num_pts = len(self.pt_frame['s'])
         
         # Initialize with max corridor width
@@ -212,58 +213,66 @@ class GeometryEngine:
         # Iterate through every point on the path
         for i in range(num_pts):
             frame_pos = self.pt_frame['pos'][i]
-            frame_n1 = self.pt_frame['n1'][i]
-            frame_t = self.pt_frame['t'][i] 
+            frame_n1 = self.pt_frame['n1'][i]  # Lateral Vector (Right/Left)
+            frame_n2 = self.pt_frame['n2'][i]  # Vertical Vector (Up/Down)
+            frame_t = self.pt_frame['t'][i]    # Tangent Vector (Forward)
             
             for obs_idx, obs in enumerate(self.obstacles_pos):
                 r_vec = obs - frame_pos
                 
                 # --- 1. Longitudinal Check ---
-                # Calculate distance along the tangent
                 d_long = np.dot(r_vec, frame_t)
-                
-                # CRITICAL FIX: Only consider obstacles touching the current slice.
-                # If d_long > radius, the obstacle is ahead/behind, not 'here'.
-                if abs(d_long) > self.SAFETY_RADIUS + 0.1:
+                if abs(d_long) > self.SAFETY_RADIUS:
                     continue
 
-                # --- 2. Lateral Check ---
+                # --- 2. Vertical Check ---
+                d_vert = np.dot(r_vec, frame_n2)
+                if abs(d_vert) > 1.0: 
+                    continue
+
+                # --- 3. Lateral Check ---
                 w1_obs = np.dot(r_vec, frame_n1)
                 
-                # Optimization: Ignore far obstacles
                 if abs(w1_obs) > (self.MAX_LATERAL_WIDTH + self.SAFETY_RADIUS + 0.5):
                     continue
 
-                # --- 3. Apply Constraints ---
+                # --- 4. Apply Constraints ---
                 # Left side obstacle (limits Upper Bound)
                 if w1_obs > 0:
                     safe_edge = w1_obs - self.SAFETY_RADIUS
-                    # Only cut if the obstacle is actually INSIDE the current max bound
                     if safe_edge < ub_w1[i]:
-                        # --- DEBUG PRINT ---
-                        print(f"[DEBUG] PathIdx {i}: Obs#{obs_idx} at {obs} hitting LEFT wall.")
-                        print(f"        LongDist: {d_long:.4f}, LatDist: {w1_obs:.4f}")
-                        print(f"        Shrinking UpperBound from {ub_w1[i]:.4f} to {safe_edge:.4f}")
-                        # -------------------
+                        # --- DEBUG: STORE VECTOR ---
+                        # Store tuple (start_pos, end_pos) for visualization
+                        self.debug_vectors.append((frame_pos, obs))
+                        
+                        # Print
+                        print(f"\n[DEBUG] HIT at PathIdx {i}")
+                        print(f"  Drone Pos:   {frame_pos}")
+                        print(f"  Obs Pos:     {obs}")
+                        print(f"  Distances:   Long={d_long:.4f}, Vert={d_vert:.4f}, Lat={w1_obs:.4f}")
+                        print(f"  Action:      Shrink UB {ub_w1[i]:.4f} -> {safe_edge:.4f}")
+                        
                         ub_w1[i] = safe_edge
                 
                 # Right side obstacle (limits Lower Bound)
                 else:
                     safe_edge = w1_obs + self.SAFETY_RADIUS
-                    # Only cut if the obstacle is actually INSIDE the current max bound
                     if safe_edge > lb_w1[i]:
-                        # --- DEBUG PRINT ---
-                        print(f"[DEBUG] PathIdx {i}: Obs#{obs_idx} at {obs} hitting RIGHT wall.")
-                        print(f"        LongDist: {d_long:.4f}, LatDist: {w1_obs:.4f}")
-                        print(f"        Shrinking LowerBound from {lb_w1[i]:.4f} to {safe_edge:.4f}")
-                        # -------------------
+                        # --- DEBUG: STORE VECTOR ---
+                        self.debug_vectors.append((frame_pos, obs))
+                        
+                        print(f"\n[DEBUG] HIT at PathIdx {i}")
+                        print(f"  Drone Pos:   {frame_pos}")
+                        print(f"  Obs Pos:     {obs}")
+                        print(f"  Distances:   Long={d_long:.4f}, Vert={d_vert:.4f}, Lat={w1_obs:.4f}")
+                        print(f"  Action:      Shrink LB {lb_w1[i]:.4f} -> {safe_edge:.4f}")
+                        
                         lb_w1[i] = safe_edge
 
         # Cleanup: Check for collapse
         collapsed = lb_w1 >= ub_w1
         if np.any(collapsed):
             print(f"[Geometry] WARNING: Corridor collapsed at {np.sum(collapsed)} points.")
-            # Force a tiny valid corridor so the visualization doesn't break
             mid = (lb_w1[collapsed] + ub_w1[collapsed]) / 2
             lb_w1[collapsed] = mid - 0.05
             ub_w1[collapsed] = mid + 0.05
@@ -284,8 +293,7 @@ class GeometryEngine:
             name='Centerline'
         ))
 
-        # --- 2. Plot Static Wall Boundaries (Offline Corridor) ---
-        # Downsample for performance (KEPT AT 1 FOR DEBUGGING RESOLUTION)
+        # --- 2. Plot Static Wall Boundaries ---
         step = 1 
         p_vis = path[::step]
         n1_vis = self.pt_frame["n1"][::step]
@@ -298,7 +306,6 @@ class GeometryEngine:
         wall_left = p_vis + (n1_vis * ub[:, np.newaxis])
         wall_right = p_vis + (n1_vis * lb[:, np.newaxis])
         
-        # Left Wall (Continuous Orange)
         fig.add_trace(go.Scatter3d(
             x=wall_left[:, 0], y=wall_left[:, 1], z=wall_left[:, 2],
             mode='lines',
@@ -306,7 +313,6 @@ class GeometryEngine:
             name='Safe Bound (Left)'
         ))
 
-        # Right Wall (Dashed Red)
         fig.add_trace(go.Scatter3d(
             x=wall_right[:, 0], y=wall_right[:, 1], z=wall_right[:, 2],
             mode='lines',
@@ -314,7 +320,6 @@ class GeometryEngine:
             name='Safe Bound (Right)'
         ))
         
-        # "Rungs" (Connecting lines to visualize corridor width)
         rung_x, rung_y, rung_z = [], [], []
         for i in range(len(wall_left)):
             rung_x.extend([wall_left[i, 0], wall_right[i, 0], None])
@@ -338,34 +343,7 @@ class GeometryEngine:
             name='Waypoints'
         ))
 
-        # --- 4. Plot Gates ---
-        # for i, (pos, norm, gy, gz) in enumerate(zip(self.gates_pos, self.gate_normals, self.gate_y, self.gate_z)):
-        #     w, h = 1.0, 1.0 
-        #     corners = np.array([
-        #         pos + (gy*w/2) + (gz*h/2), 
-        #         pos - (gy*w/2) + (gz*h/2), 
-        #         pos - (gy*w/2) - (gz*h/2), 
-        #         pos + (gy*w/2) - (gz*h/2), 
-        #         pos + (gy*w/2) + (gz*h/2)
-        #     ])
-            
-        #     fig.add_trace(go.Scatter3d(
-        #         x=corners[:, 0], y=corners[:, 1], z=corners[:, 2],
-        #         mode='lines',
-        #         line=dict(color='magenta', width=5),
-        #         name=f'Gate {i}',
-        #         showlegend=False
-        #     ))
-            
-        #     fig.add_trace(go.Scatter3d(
-        #         x=[pos[0]], y=[pos[1]], z=[pos[2] + 0.6],
-        #         mode='text',
-        #         text=[f"G{i}"],
-        #         textposition="top center",
-        #         showlegend=False
-        #     ))
-
-        # --- 5. Plot Obstacles as Cylinders ---
+        # --- 4. Plot Obstacles ---
         if len(self.obstacles_pos) > 0:
             u = np.linspace(0, 2 * np.pi, 25)
             z_pole = np.linspace(0, self.POLE_HEIGHT, 2)
@@ -386,6 +364,21 @@ class GeometryEngine:
                     showlegend=first_obs 
                 ))
                 first_obs = False
+
+        # --- 5. Plot Debug Vectors (The r_vec lines) ---
+        if len(self.debug_vectors) > 0:
+            vec_x, vec_y, vec_z = [], [], []
+            for start, end in self.debug_vectors:
+                vec_x.extend([start[0], end[0], None])
+                vec_y.extend([start[1], end[1], None])
+                vec_z.extend([start[2], end[2], None])
+            
+            fig.add_trace(go.Scatter3d(
+                x=vec_x, y=vec_y, z=vec_z,
+                mode='lines',
+                line=dict(color='cyan', width=2),
+                name='DEBUG: Hit Vectors'
+            ))
 
         # Start Position Marker
         fig.add_trace(go.Scatter3d(
