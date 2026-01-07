@@ -38,7 +38,7 @@ matplotlib.use('Agg')
 CONSTANTS = {
     "v_max_ref": 1.5,           # m/s
     "corner_acc": 1.95,         # m/s^2
-    "mpc_horizon": 250,          # Steps
+    "mpc_horizon": 50,          # Steps
     "max_lateral_width": 0.35,  # m (Corridor width)
     "safety_radius": 0.15,      # m (Obstacle radius + Drone radius buffer)
     "tf_horizon": 1.0           # s
@@ -103,7 +103,7 @@ def symbolic_dynamics_spatial(params: Dict[str, Any]) -> Tuple[ca.MX, ca.MX, ca.
     c_rpy = ca.DM(rpy_coef)
     c_drpy = ca.DM(rpy_rates_coef)
     c_cmd = ca.DM(cmd_rpy_coef)
-    ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy # This is very important!
+    ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy 
 
     thrust_mag = acc_coef + cmd_f_coef * T_c
     F_body = ca.vertcat(0, 0, thrust_mag)
@@ -150,7 +150,7 @@ def export_model(params: Dict[str, Any]) -> AcadosModel:
     return model
 
 # ==============================================================================
-# 3. GEOMETRY ENGINE (UPDATED WITH 2D PROJECTION LOGIC)
+# 3. GEOMETRY ENGINE (IMPROVED SPLINE GENERATION)
 # ==============================================================================
 
 class GeometryEngine:
@@ -170,21 +170,30 @@ class GeometryEngine:
         self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
         self.start_pos = np.asarray(start_pos, dtype=np.float64)
 
+        # 1. Initialize basic gate waypoints
         self.waypoints, self.wp_types, self.wp_normals = self._initialize_waypoints()
+        
+        # 2. Add detours for sharp gate turns
         self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
             self.waypoints, self.wp_types, self.wp_normals
         )
+        
+        # 3. NEW: Add logic to avoid obstacles in the straight line path
+        self.waypoints, self.wp_types, self.wp_normals = self._add_obstacle_avoidance_logic(
+            self.waypoints, self.wp_types, self.wp_normals
+        )
+        
+        # 4. Generate Spline
         self.tangents = self._compute_hermite_tangents()
-
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
         self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
         self.total_length = self.s_knots[-1]
         self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
         
-        # Initialize PT frame with high resolution for offline bounds checking
+        # 5. Initialize PT frame
         self.pt_frame = self._generate_parallel_transport_frame(num_points=int(self.total_length * 100)) # ~1cm resolution
         
-        # --- NEW: Generate Bounds Offline ---
+        # 6. Generate Corridor Bounds
         self.corridor_map = self._generate_static_corridor()
 
     def _initialize_waypoints(self):
@@ -225,6 +234,88 @@ class GeometryEngine:
             new_wps.append(next_p)
             new_types.append(types[i+1])
             new_normals.append(normals[i+1])
+        return np.array(new_wps), np.array(new_types), np.array(new_normals)
+
+    def _add_obstacle_avoidance_logic(self, wps, types, normals):
+        """
+        Raycasts between waypoints. If an obstacle intersects the line segment,
+        insert a detour waypoint to route around it.
+        """
+        if len(self.obstacles_pos) == 0:
+            return wps, types, normals
+
+        new_wps = [wps[0]]
+        new_types = [types[0]]
+        new_normals = [normals[0]]
+
+        # Radius to check against (safety radius + drone size buffer)
+        # We make this slightly larger than the corridor generation radius 
+        # to ensure the spline bends well before the wall check triggers.
+        check_radius = self.safety_radius + 0.35 
+
+        for i in range(len(wps) - 1):
+            p1 = wps[i]
+            p2 = wps[i+1]
+            
+            # Check for intersections with ANY obstacle
+            collision = False
+            best_detour = None
+            
+            for obs in self.obstacles_pos:
+                # Geometric intersection test (Line Segment vs Sphere)
+                d = p2 - p1
+                f = p1 - obs
+                
+                a = np.dot(d, d)
+                b = 2 * np.dot(f, d)
+                c = np.dot(f, f) - check_radius**2
+                
+                discriminant = b*b - 4*a*c
+                
+                if discriminant >= 0:
+                    # Line intersects sphere (or is tangent)
+                    discriminant = np.sqrt(discriminant)
+                    t1 = (-b - discriminant) / (2*a)
+                    t2 = (-b + discriminant) / (2*a)
+                    
+                    # Check if the intersection points are actually on the segment [0, 1]
+                    if (0 <= t1 <= 1) or (0 <= t2 <= 1):
+                        # Collision detected! Calculate detour point.
+                        # We find the point on the line closest to the obstacle center
+                        t_closest = -np.dot(f, d) / np.dot(d, d)
+                        t_closest = np.clip(t_closest, 0, 1)
+                        closest_pt = p1 + t_closest * d
+                        
+                        # 
+
+                        # Vector from obstacle center to that point
+                        push_vec = closest_pt - obs
+                        push_dist = np.linalg.norm(push_vec)
+                        
+                        if push_dist < 1e-6:
+                            # Direct hit through center -> Push Up (arbitrary valid direction)
+                            push_dir = np.array([0, 0, 1.0])
+                        else:
+                            push_dir = push_vec / push_dist
+                            
+                        # Create detour point: Obs Center + (Radius + Buffer) * Direction
+                        detour_pt = obs + push_dir * (check_radius + 0.1)
+                        
+                        best_detour = detour_pt
+                        collision = True
+                        # We break after first collision per segment to keep path simple
+                        # (Multi-obstacle segments are rare in this setup)
+                        break 
+            
+            if collision:
+                new_wps.append(best_detour)
+                new_types.append(2) # Type 2 = Detour
+                new_normals.append(np.zeros(3))
+            
+            new_wps.append(p2)
+            new_types.append(types[i+1])
+            new_normals.append(normals[i+1])
+
         return np.array(new_wps), np.array(new_types), np.array(new_normals)
 
     def _compute_hermite_tangents(self):
@@ -323,12 +414,10 @@ class GeometryEngine:
             t_2d = np.array([frame_t[0], frame_t[1], 0.0])
             norm_t = np.linalg.norm(t_2d)
             if norm_t < 1e-3:
-                # Vertical flight? Skip, no lateral definition on ground
                 continue
             t_2d /= norm_t
             
             # 3. Compute 2D Normal (Rotate 90 deg around Z)
-            # If t_2d = [x, y], then normal is [-y, x] (Standard 2D left normal)
             n1_2d = np.array([-t_2d[1], t_2d[0], 0.0])
             
             for obs in self.obstacles_pos:
@@ -342,12 +431,10 @@ class GeometryEngine:
                 d_long = np.dot(r_vec_2d, t_2d)
                 
                 # STRICT FILTER: Is the obstacle shadow 'here' along the track?
-                # If d_long > radius, the obstacle is ahead/behind, not 'here'.
                 if abs(d_long) > self.safety_radius + .4:
                     continue
 
                 # --- B. Lateral Check (2D) ---
-                # How far left/right is the obstacle shadow?
                 w1_obs = np.dot(r_vec_2d, n1_2d)
                 
                 # Optimization: Ignore far obstacles
@@ -355,21 +442,14 @@ class GeometryEngine:
                     continue
 
                 # --- C. Apply Constraints ---
-                # Check Dominant Side based on 2D footprint
-                
-                # Left side obstacle (limits Upper Bound)
-                if w1_obs > 0:
+                if w1_obs > 0: # Left
                     safe_edge = w1_obs - self.safety_radius
                     if safe_edge < ub_w1[i]:
-                        # Store the REAL 3D vector for visualization
                         self.debug_vectors.append((frame_pos, obs))
                         ub_w1[i] = safe_edge
-                
-                # Right side obstacle (limits Lower Bound)
-                else:
+                else: # Right
                     safe_edge = w1_obs + self.safety_radius
                     if safe_edge > lb_w1[i]:
-                        # Store the REAL 3D vector for visualization
                         self.debug_vectors.append((frame_pos, obs))
                         lb_w1[i] = safe_edge
 
@@ -385,7 +465,6 @@ class GeometryEngine:
         return {"lb_w1": lb_w1, "ub_w1": ub_w1}
 
     def get_static_bounds(self, s_query):
-        """Lookup pre-computed bounds for a given s"""
         idx = np.searchsorted(self.pt_frame['s'], s_query)
         idx = np.clip(idx, 0, len(self.pt_frame['s'])-1)
         return self.corridor_map['lb_w1'][idx], self.corridor_map['ub_w1'][idx]
@@ -425,10 +504,7 @@ class SpatialMPC:
         nx, nu = 12, 4
         ny, ny_e = nx + nu, nx
         
-        # Cost Matrices
-        # s (1), w1 (2), w2 (3), ds (4), dw1 (5), dw2 (6), phi (7), theta (8), psi (9), dphi (10), dtheta (11), dpsi (12)
         q_diag = np.array([1.0, 0.1, 0.1, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
-        # 
         r_diag = np.array([5.0, 5.0, 5.0, 0.1])
         
         ocp.cost.W = scipy.linalg.block_diag(np.diag(q_diag), np.diag(r_diag))
@@ -443,7 +519,6 @@ class SpatialMPC:
         ocp.constraints.lbu = np.array([-0.5, -0.5, -0.5, self.params['thrust_min'] * 4])
         ocp.constraints.ubu = np.array([+0.5, +0.5, +0.5, self.params['thrust_max'] * 4])
         
-        # Soft State Bounds (w1, w2, phi, theta, psi)
         ocp.constraints.idxbx = np.array([1, 2, 6, 7, 8])
         ocp.constraints.lbx = np.array([-0.4, -0.4, -0.5, -0.5, -0.5]) 
         ocp.constraints.ubx = np.array([+0.4, +0.4, +0.5, +0.5, +0.5])
@@ -531,22 +606,18 @@ class SpatialMPCController(Controller):
         """
         if self.env is None: return
 
-        # Extract pre-computed data
         step = 10 
         positions = self.geo.pt_frame['pos'][::step]
         n1_vecs = self.geo.pt_frame['n1'][::step]
         
-        # Get bounds for these specific indices
         full_indices = np.arange(0, len(self.geo.pt_frame['s']), step)
         
         lb_w1 = self.geo.corridor_map['lb_w1'][full_indices]
         ub_w1 = self.geo.corridor_map['ub_w1'][full_indices]
 
-        # Calculate Boundary Points
         left_bound_pts = positions + (n1_vecs * ub_w1[:, np.newaxis])
         right_bound_pts = positions + (n1_vecs * lb_w1[:, np.newaxis])
 
-        # Draw Lines
         try:
             draw_line(self.env, points=left_bound_pts, rgba=np.array([1.0, 0.65, 0.0, 0.5]))
             draw_line(self.env, points=right_bound_pts, rgba=np.array([1.0, 0.65, 0.0, 0.5]))
@@ -554,33 +625,10 @@ class SpatialMPCController(Controller):
             print(f"Visualization Error: {e}")
 
     def _draw_debug_vectors(self):
-        """
-        Draws the collision rays (r_vec) stored in the geometry engine.
-        These are the Cyan lines showing which obstacle is hitting the path.
-        """
         if self.env is None or not self.geo.debug_vectors: return
-        
         try:
-            # draw_line expects points in sequence. 
-            # We create a list [start1, end1, start2, end2, ...]
-            # Note: draw_line implementation varies. If it connects all points, this might look zig-zaggy.
-            # Assuming draw_line takes segment pairs or we call it per segment.
-            # For efficiency in some envs, we'll try to batch if possible, or loop.
-            
-            # If draw_line connects sequence, we use the nan trick or just loop.
-            # Given we likely can't use NaN in this specific draw_line wrapper without knowing internals,
-            # we will assume we can pass a list of pairs if modified, OR we loop.
-            
-            # Safe approach: Plot points. If draw_line connects them, it might be messy.
-            # Ideally, draw_line handles `mode="lines"` (segments).
-            # If not, we iterate.
-            
-            # Since we want to be safe and `draw_line` usually connects points sequentially:
-            # We will grab just the last few vectors to avoid clutter/lag, or just loop.
-            
             for start, end in self.geo.debug_vectors:
                  draw_line(self.env, points=np.array([start, end]), rgba=np.array([0.0, 1.0, 1.0, 0.8])) # Cyan
-                 
         except Exception as e:
             pass
 
@@ -609,8 +657,7 @@ class SpatialMPCController(Controller):
     def compute_control(self, obs: Dict, info: Optional[Dict] = None) -> np.ndarray:
         self._draw_global_track()
         self._draw_static_corridor()
-        # self._draw_debug_vectors() # New Debug Call
-        
+        # self._draw_debug_vectors() 
         
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
@@ -633,7 +680,6 @@ class SpatialMPCController(Controller):
         for k in range(self.mpc.N):
             s_pred = curr_s + k * max(curr_ds, 1.0) * dt 
             
-            # Lookup Bounds
             lb_w1, ub_w1 = self.geo.get_static_bounds(s_pred)
             lb_w2, ub_w2 = -self.W2_MAX, self.W2_MAX
             
@@ -682,9 +728,6 @@ class SpatialMPCController(Controller):
                 for k in range(self.mpc.N + 1):
                     x_k = self.mpc.solver.get(k, "x")
                     mpc_points.append(self._spatial_to_cartesian(x_k[0], x_k[1], x_k[2]))
-                # draw_line(self.env, points=np.array(mpc_points), rgba=np.array([0.0, 0.0, 1.0, 0.8]))
-                # draw_line(self.env, points=np.array(vis_dynamic_left), rgba=np.array([1.0, 0.5, 0.0, 0.9]))
-                # draw_line(self.env, points=np.array(vis_dynamic_right), rgba=np.array([1.0, 0.5, 0.0, 0.9]))
             except Exception:
                 pass
             

@@ -198,9 +198,10 @@ class GeometryEngine:
 
     def _generate_static_corridor(self) -> Dict[str, NDArray]:
         """
-        Calculates safe corridor bounds (w1) with strict 3D bounds checking.
+        Calculates safe corridor bounds (w1) using 2D GROUND PROJECTION.
+        Checks if obstacles' 2D footprint intersects the path's 2D footprint.
         """
-        print(f"[Geometry] Generating bounds. Safety Radius: {self.SAFETY_RADIUS}")
+        print(f"[Geometry] Generating bounds (2D GROUND PROJECTION). Safety Radius: {self.SAFETY_RADIUS}")
         num_pts = len(self.pt_frame['s'])
         
         # Initialize with max corridor width
@@ -213,44 +214,65 @@ class GeometryEngine:
         # Iterate through every point on the path
         for i in range(num_pts):
             frame_pos = self.pt_frame['pos'][i]
-            frame_n1 = self.pt_frame['n1'][i]  # Lateral Vector (Right/Left)
-            frame_n2 = self.pt_frame['n2'][i]  # Vertical Vector (Up/Down)
-            frame_t = self.pt_frame['t'][i]    # Tangent Vector (Forward)
+            frame_t = self.pt_frame['t'][i]
+            
+            # --- GROUND PROJECTION (Flatten Z to 0) ---
+            # 1. Project Path Position to Ground
+            pos_2d = np.array([frame_pos[0], frame_pos[1], 0.0])
+            
+            # 2. Project Tangent to Ground & Normalize
+            # This gives us the "Forward" direction on the map
+            t_2d = np.array([frame_t[0], frame_t[1], 0.0])
+            norm_t = np.linalg.norm(t_2d)
+            if norm_t < 1e-3:
+                # Vertical flight? Skip, no lateral definition on ground
+                continue
+            t_2d /= norm_t
+            
+            # 3. Compute 2D Normal (Rotate 90 deg around Z)
+            # If t_2d = [x, y], then normal is [-y, x] (Standard 2D left normal)
+            n1_2d = np.array([-t_2d[1], t_2d[0], 0.0])
             
             for obs_idx, obs in enumerate(self.obstacles_pos):
-                r_vec = obs - frame_pos
+                # 4. Project Obstacle to Ground
+                obs_2d = np.array([obs[0], obs[1], 0.0])
                 
-                # --- 1. Longitudinal Check ---
-                d_long = np.dot(r_vec, frame_t)
+                # Vector from Path (2D) to Obstacle (2D)
+                r_vec_2d = obs_2d - pos_2d
+                
+                # --- A. Longitudinal Check (2D) ---
+                d_long = np.dot(r_vec_2d, t_2d)
+                
+                # STRICT FILTER: Is the obstacle shadow 'here' along the track?
                 if abs(d_long) > self.SAFETY_RADIUS:
                     continue
 
-                # --- 2. Vertical Check ---
-                d_vert = np.dot(r_vec, frame_n2)
-                if abs(d_vert) > 1.0: 
-                    continue
-
-                # --- 3. Lateral Check ---
-                w1_obs = np.dot(r_vec, frame_n1)
+                # --- B. Lateral Check (2D) ---
+                # How far left/right is the obstacle shadow?
+                w1_obs = np.dot(r_vec_2d, n1_2d)
                 
+                # Optimization: Ignore far obstacles
                 if abs(w1_obs) > (self.MAX_LATERAL_WIDTH + self.SAFETY_RADIUS + 0.5):
                     continue
 
-                # --- 4. Apply Constraints ---
+                # --- C. Apply Constraints ---
+                # Check Dominant Side based on 2D footprint
+                
                 # Left side obstacle (limits Upper Bound)
                 if w1_obs > 0:
                     safe_edge = w1_obs - self.SAFETY_RADIUS
                     if safe_edge < ub_w1[i]:
-                        # --- DEBUG: STORE VECTOR ---
-                        # Store tuple (start_pos, end_pos) for visualization
+                        # --- DEBUG: Store the 3D vector for visualization context ---
+                        # We draw the line from REAL 3D pos to REAL 3D obs 
+                        # to show which physical object caused the 2D logic to trigger.
                         self.debug_vectors.append((frame_pos, obs))
                         
                         # Print
-                        print(f"\n[DEBUG] HIT at PathIdx {i}")
-                        print(f"  Drone Pos:   {frame_pos}")
-                        print(f"  Obs Pos:     {obs}")
-                        print(f"  Distances:   Long={d_long:.4f}, Vert={d_vert:.4f}, Lat={w1_obs:.4f}")
-                        print(f"  Action:      Shrink UB {ub_w1[i]:.4f} -> {safe_edge:.4f}")
+                        print(f"\n[DEBUG] HIT at PathIdx {i} (Ground Projected)")
+                        print(f"  Pos 2D:   {pos_2d}")
+                        print(f"  Obs 2D:   {obs_2d}")
+                        print(f"  Distances: Long={d_long:.4f}, Lat={w1_obs:.4f}")
+                        print(f"  Action:    Shrink UB {ub_w1[i]:.4f} -> {safe_edge:.4f}")
                         
                         ub_w1[i] = safe_edge
                 
@@ -258,14 +280,14 @@ class GeometryEngine:
                 else:
                     safe_edge = w1_obs + self.SAFETY_RADIUS
                     if safe_edge > lb_w1[i]:
-                        # --- DEBUG: STORE VECTOR ---
+                        # --- DEBUG: Store Vector ---
                         self.debug_vectors.append((frame_pos, obs))
                         
-                        print(f"\n[DEBUG] HIT at PathIdx {i}")
-                        print(f"  Drone Pos:   {frame_pos}")
-                        print(f"  Obs Pos:     {obs}")
-                        print(f"  Distances:   Long={d_long:.4f}, Vert={d_vert:.4f}, Lat={w1_obs:.4f}")
-                        print(f"  Action:      Shrink LB {lb_w1[i]:.4f} -> {safe_edge:.4f}")
+                        print(f"\n[DEBUG] HIT at PathIdx {i} (Ground Projected)")
+                        print(f"  Pos 2D:   {pos_2d}")
+                        print(f"  Obs 2D:   {obs_2d}")
+                        print(f"  Distances: Long={d_long:.4f}, Lat={w1_obs:.4f}")
+                        print(f"  Action:    Shrink LB {lb_w1[i]:.4f} -> {safe_edge:.4f}")
                         
                         lb_w1[i] = safe_edge
 
@@ -303,6 +325,8 @@ class GeometryEngine:
         ub = self.corridor_map["ub_w1"][indices]
         
         # Compute Wall Coordinates
+        # NOTE: Even though we calculated logic in 2D, we apply bounds to the 3D frame
+        # to create the "Infinite Vertical Walls" visualization.
         wall_left = p_vis + (n1_vis * ub[:, np.newaxis])
         wall_right = p_vis + (n1_vis * lb[:, np.newaxis])
         
@@ -353,7 +377,9 @@ class GeometryEngine:
             for obs in self.obstacles_pos:
                 X_pole = self.SAFETY_RADIUS * np.cos(U) + obs[0]
                 Y_pole = self.SAFETY_RADIUS * np.sin(U) + obs[1]
-                Z_shifted = Z_pole + (obs[2] - self.POLE_HEIGHT/2)
+                # Shift Z to start at ground (z=0) because we are using ground logic
+                # Assuming pole is base 0 to height
+                Z_shifted = Z_pole
                 
                 fig.add_trace(go.Surface(
                     x=X_pole, y=Y_pole, z=Z_shifted,
@@ -365,7 +391,7 @@ class GeometryEngine:
                 ))
                 first_obs = False
 
-        # --- 5. Plot Debug Vectors (The r_vec lines) ---
+        # --- 5. Plot Debug Vectors ---
         if len(self.debug_vectors) > 0:
             vec_x, vec_y, vec_z = [], [], []
             for start, end in self.debug_vectors:
@@ -390,7 +416,7 @@ class GeometryEngine:
 
         # --- Layout Settings ---
         fig.update_layout(
-            title="Interactive Flight Corridor (Plotly)",
+            title="Interactive Flight Corridor (2D Projection Logic)",
             scene=dict(
                 aspectmode='data', 
                 xaxis_title='X (m)',

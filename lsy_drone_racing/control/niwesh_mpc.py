@@ -156,7 +156,7 @@ class MPCSplineController(Controller):
     # MPC Constants
     MPC_HORIZON_STEPS = 25  # N
 
-    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict):
+    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env = None):
         super().__init__(initial_obs, info, sim_config)
 
         # ---------------------------------------------------------
