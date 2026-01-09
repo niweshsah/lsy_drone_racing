@@ -25,10 +25,10 @@ from lsy_drone_racing.control import Controller
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
 # This creates an acados model from the symbolic drone model.
 def create_acados_model(parameters: dict) -> AcadosModel:
     """Creates an acados model from a symbolic drone_model."""
-    
     X_dot, X, U, Y = symbolic_dynamics_euler(
         mass=parameters["mass"],
         gravity_vec=parameters["gravity_vec"],
@@ -51,27 +51,27 @@ def create_acados_model(parameters: dict) -> AcadosModel:
 
     return model
 
+
 # This function creates the acados OCP and solver.
 # This is the main function to modify to change the MPC formulation.
 def create_ocp_solver(
     Tf: float, N: int, parameters: dict, verbose: bool = False
 ) -> tuple[AcadosOcpSolver, AcadosOcp]:
     """Creates an acados Optimal Control Problem and Solver."""
-    
     ocp = AcadosOcp()
 
     # Set model
     ocp.model = create_acados_model(parameters)
 
     # Get Dimensions
-    nx = ocp.model.x.rows() # number of states
+    nx = ocp.model.x.rows()  # number of states
     # nx  = 12
-    nu = ocp.model.u.rows() # Number of inputs (4: cmd_rpy, thrust)
+    nu = ocp.model.u.rows()  # Number of inputs (4: cmd_rpy, thrust)
     ny = nx + nu  # Size of cost vector for intermediate steps
     ny_e = nx  # Size of cost vector for the final step (no input)
 
     # Set dimensions
-    ocp.solver_options.N_horizon = N # number of look-ahead steps
+    ocp.solver_options.N_horizon = N  # number of look-ahead steps
 
     ## Set Cost
     # For more Information regarding Cost Function Definition in Acados:
@@ -85,20 +85,34 @@ def create_ocp_solver(
     # Weights
     # State weights
     # This defines how "bad" it is to deviate from the trajectory.
-    
-    Q = np.diag([
-    50.0, 50.0, 400.0,  # Position (x, y, z)
-    1.0, 1.0, 1.0,      # Orientation (roll, pitch, yaw)
-    10.0, 10.0, 10.0,   # Velocity (vx, vy, vz)
-    5.0, 5.0, 5.0       # Angular Rates (p, q, r)
-])
-    
+
+    Q = np.diag(
+        [
+            50.0,
+            50.0,
+            400.0,  # Position (x, y, z)
+            1.0,
+            1.0,
+            1.0,  # Orientation (roll, pitch, yaw)
+            10.0,
+            10.0,
+            10.0,  # Velocity (vx, vy, vz)
+            5.0,
+            5.0,
+            5.0,  # Angular Rates (p, q, r)
+        ]
+    )
+
     # Input weights (reference is upright orientation and hover thrust)
     # this defines how "bad" it is to use control inputs.
-    R = np.diag([
-    1.0, 1.0, 1.0,  # Cmd Orientation
-    50.0            # Cmd Thrust
-])
+    R = np.diag(
+        [
+            1.0,
+            1.0,
+            1.0,  # Cmd Orientation
+            50.0,  # Cmd Thrust
+        ]
+    )
 
     Q_e = Q.copy()
     # combines state and input weights into single weight matrices
@@ -131,7 +145,6 @@ def create_ocp_solver(
     Vx[0:nx, 0:nx] = np.eye(nx)  # Select all states
     ocp.cost.Vx = Vx
 
-
     Vu = np.zeros((ny, nu))
     Vu[nx : nx + nu, :] = np.eye(nu)  # Select all actions
     ocp.cost.Vu = Vu
@@ -140,11 +153,9 @@ def create_ocp_solver(
     Vx_e[0:nx, 0:nx] = np.eye(nx)  # Select all states
     ocp.cost.Vx_e = Vx_e
 
-
     # Set initial references (we will overwrite these later on to make the controller track the traj.)
     # Initially hover at origin with zero angles and zero velocities
     ocp.cost.yref, ocp.cost.yref_e = np.zeros((ny,)), np.zeros((ny_e,))
-
 
     # Set State Constraints (rpy < 30°)
     ocp.constraints.lbx = np.array([-0.5, -0.5, -0.5])
@@ -156,7 +167,6 @@ def create_ocp_solver(
     ocp.constraints.ubu = np.array([0.5, 0.5, 0.5, parameters["thrust_max"] * 4])
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
 
-
     # We have to set x0 even though we will overwrite it later on.
     # xo is the initial state at time step 0.
     ocp.constraints.x0 = np.zeros((nx))
@@ -167,7 +177,6 @@ def create_ocp_solver(
     ocp.solver_options.integrator_type = "ERK"
     ocp.solver_options.nlp_solver_type = "SQP"  # SQP, SQP_RTI
     ocp.solver_options.tol = 1e-6
-
 
     ocp.solver_options.qp_solver_cond_N = N
     ocp.solver_options.qp_solver_warm_start = 1
@@ -224,51 +233,51 @@ class AttitudeMPC(Controller):
             ]
         )
         self._t_total = 15  # s
-        
+
         # create an evenly spaced time array for the waypoints
         t = np.linspace(0, self._t_total, len(waypoints))
-        
+
         # create cubic spline interpolations for position and velocity
         self._des_pos_spline = CubicSpline(t, waypoints)
-        
+
         # derivative of position spline gives velocity spline
         self._des_vel_spline = self._des_pos_spline.derivative()
-        
+
         # This creates a time series of waypoints for the entire trajectory
         self._waypoints_pos = self._des_pos_spline(
             np.linspace(0, self._t_total, int(config.env.freq * self._t_total))
         )
-        
+
         # same as above for velocity
         self._waypoints_vel = self._des_vel_spline(
             np.linspace(0, self._t_total, int(config.env.freq * self._t_total))
         )
-        
+
         # set desired yaw to zero for all waypoints
         self._waypoints_yaw = self._waypoints_pos[:, 0] * 0
 
         # Load drone parameters
         self.drone_params = load_params("so_rpy", config.sim.drone_model)
-        
+
         # Create OCP solver
         self._acados_ocp_solver, self._ocp = create_ocp_solver(
             self._T_HORIZON, self._N, self.drone_params
         )
-        
+
         # set model dimension size for run-time use
         self._nx = self._ocp.model.x.rows()
         # nx = 12
         self._nu = self._ocp.model.u.rows()
-        
+
         self._ny = self._nx + self._nu
         self._ny_e = self._nx
 
         self._tick = 0
-        
+
         # max tick
         # We subtract N to ensure we have enough waypoints to fill the horizon
         self._tick_max = len(self._waypoints_pos) - 1 - self._N
-        
+
         self._config = config
         self._finished = False
 
@@ -294,43 +303,40 @@ class AttitudeMPC(Controller):
         # create rpy and drpy from quat and ang_vel as they are not provided in obs
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         obs["drpy"] = ang_vel2rpy_rates(obs["quat"], obs["ang_vel"])
-        
+
         # concatenate position, orientation, velocity, and angular velocity into state vector
         x0 = np.concatenate((obs["pos"], obs["rpy"], obs["vel"], obs["drpy"]))
-        
-        # Set the stage-0 state bounds to x0
-        self._acados_ocp_solver.set(0, "lbx", x0) # stage, bound type, value
-        self._acados_ocp_solver.set(0, "ubx", x0)
 
+        # Set the stage-0 state bounds to x0
+        self._acados_ocp_solver.set(0, "lbx", x0)  # stage, bound type, value
+        self._acados_ocp_solver.set(0, "ubx", x0)
 
         # Setting state reference
         # initialize yref with zeros
-        
+
         # y_ref is a (N x ny) matrix where each row is the reference for that time step
         yref = np.zeros((self._N, self._ny))
-        
+
         # Setting intermediate state references
         yref[:, 0:3] = self._waypoints_pos[i : i + self._N]  # position
-        
-        
+
         # zero roll, pitch
         # no roll or pitch tracking
         yref[:, 5] = self._waypoints_yaw[i : i + self._N]  # yaw; This is all set to zero
-        
+
         # velocity tracking
         yref[:, 6:9] = self._waypoints_vel[i : i + self._N]  # velocity
 
         # set thrust reference to hover thrust
         yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
-        
+
         # print("desired thrust:", yref[0, 15], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
-        
+
         # Note: roll, pitch and yaw are all 0 always
-        
+
         # Apply references to the solver from stage 0 to N-1
         for j in range(self._N):
             self._acados_ocp_solver.set(j, "yref", yref[j])
-
 
         # Setting final state reference
         yref_e = np.zeros((self._ny_e))
@@ -342,22 +348,30 @@ class AttitudeMPC(Controller):
         # set thrust reference to hover thrust
         self._acados_ocp_solver.set(self._N, "yref", yref_e)
 
-        
         # Solving problem and getting first input
         # Run the solver to minimize the OCP given current x0, yref for all stages, and constraints. The solver will compute the optimal sequence of inputs and states across the horizon.
-        
+
         self._acados_ocp_solver.solve()
-        
+
         # returns the optimal control input at stage 0
         u0 = self._acados_ocp_solver.get(0, "u")
-        
+
         # print(f"MPC step {self._tick}, desired pos: {self._waypoints_pos[i]}, current pos: {obs['pos']}, u0: {u0}")
-        
+
         # if self._tick % 10 == 0:
         #     print("thrust:", u0[3], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
-        
+
         if self._tick % 20 == 0:
-            print("actual thrust:", u0[3], " desired thrust:", yref[0, 15], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
+            print(
+                "actual thrust:",
+                u0[3],
+                " desired thrust:",
+                yref[0, 15],
+                " min thrust:",
+                self.drone_params["thrust_min"] * 4,
+                " max thrust:",
+                self.drone_params["thrust_max"] * 4,
+            )
 
         return u0
 

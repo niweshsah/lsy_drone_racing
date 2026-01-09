@@ -7,9 +7,10 @@ from pathlib import Path
 # Add project to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lsy_drone_racing.control.tunnel_mpc import SpatialMPCController
-from lsy_drone_racing.control import Controller
 import inspect
+
+from lsy_drone_racing.control import Controller
+from lsy_drone_racing.control.tunnel_mpc import SpatialMPCController
 
 print("Checking SpatialMPCController methods...\n")
 
@@ -18,16 +19,16 @@ print(f"✓ Inherits from Controller: {issubclass(SpatialMPCController, Controll
 
 # Check required methods
 required_methods = [
-    'compute_control',
-    'step_callback', 
-    'episode_callback',
-    'reset',
-    'episode_reset',
-    '_log_control_step',
-    'save_control_log',
-    'plot_control_values',
-    'plot_solver_status',
-    'plot_all_diagnostics'
+    "compute_control",
+    "step_callback",
+    "episode_callback",
+    "reset",
+    "episode_reset",
+    "_log_control_step",
+    "save_control_log",
+    "plot_control_values",
+    "plot_solver_status",
+    "plot_all_diagnostics",
 ]
 
 for method_name in required_methods:

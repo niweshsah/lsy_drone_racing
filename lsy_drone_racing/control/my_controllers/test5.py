@@ -1,16 +1,13 @@
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from ml_collections import ConfigDict
 from numpy.typing import NDArray
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation
 
 from lsy_drone_racing.control import Controller
-
-if TYPE_CHECKING:
-    from ml_collections import ConfigDict
-    from numpy.typing import NDArray
 
 # Set up a logger for this module
 logger = logging.getLogger(__name__)

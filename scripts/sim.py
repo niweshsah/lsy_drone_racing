@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 def simulate(
     config: str = "level2.toml",
     controller: str | None = None,
@@ -85,7 +86,9 @@ def simulate(
     ep_times = []
     for _ in range(n_runs):  # Run n_runs episodes with the controller
         obs, info = env.reset()
-        controller: Controller = controller_cls(obs, info, config, env = env)  # Instantiate the controller
+        controller: Controller = controller_cls(
+            obs, info, config, env=env
+        )  # Instantiate the controller
         i = 0
         fps = 60
 
@@ -138,20 +141,3 @@ if __name__ == "__main__":
     logging.getLogger("lsy_drone_racing").setLevel(logging.INFO)
     logger.setLevel(logging.INFO)
     fire.Fire(simulate, serialize=lambda _: None)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

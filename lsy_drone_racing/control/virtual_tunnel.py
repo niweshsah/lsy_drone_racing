@@ -1,15 +1,13 @@
-"""
-Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
+"""Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
 Combines Level 3 replanning/obstacle avoidance with Acados NMPC.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
 import numpy as np
 import scipy.linalg
-from scipy.interpolate import CubicSpline
-from scipy.spatial.transform import Rotation as R
 
 # Acados Imports
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
@@ -18,6 +16,9 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from drone_models.core import load_params
 from drone_models.so_rpy import symbolic_dynamics_euler
 from drone_models.utils.rotation import ang_vel2rpy_rates
+from scipy.interpolate import CubicSpline
+from scipy.spatial.transform import Rotation as R
+
 from lsy_drone_racing.control import Controller
 from lsy_drone_racing.utils.utils import draw_line
 
@@ -163,8 +164,7 @@ def create_ocp_solver(
 
 
 class MPCSplineController(Controller):
-    """
-    Controller that combines High-Level Spline Replanning (Obstacles/Gates)
+    """Controller that combines High-Level Spline Replanning (Obstacles/Gates)
     with Low-Level MPC tracking.
     """
 
@@ -441,8 +441,7 @@ class MPCSplineController(Controller):
     def compute_control(
         self, obs: dict[str, NDArray[np.floating]], info: dict | None = None
     ) -> NDArray[np.floating]:
-        """
-        1. Checks for replanning triggers.
+        """1. Checks for replanning triggers.
         2. Samples the spline for the MPC horizon.
         3. Solves the OCP.
         """
@@ -512,7 +511,7 @@ class MPCSplineController(Controller):
         self._acados_ocp_solver.set(self.MPC_HORIZON_STEPS, "y_ref", yref_e)
 
         # --- 5. Solve ---
-        status = self._acados_ocp_solver.solve()
+        self._acados_ocp_solver.solve()
 
         # Check status if needed (0 = success)
         # if status != 0: print(f"Acados returned status {status}")

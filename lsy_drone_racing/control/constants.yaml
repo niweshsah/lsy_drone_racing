@@ -1,0 +1,8 @@
+# Drone MPC Parameters
+constants:
+  v_max_ref: 1.5           # m/s
+  corner_acc: 1.95         # m/s^2
+  mpc_horizon: 250         # Steps
+  max_lateral_width: 0.35  # m (Corridor width)
+  safety_radius: 0.15      # m (Obstacle radius + Drone radius buffer)
+  tf_horizon: 1.0          # s

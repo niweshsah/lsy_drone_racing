@@ -1,5 +1,4 @@
-"""
-TESTING MODE:
+"""TESTING MODE:
 1) Targeted only at Gate 0.
 2) Generates a path through Gate 0, stops, and reverses back to start.
 """  # noqa: D205
@@ -32,16 +31,18 @@ class MyController(Controller):
     FLIGHT_DURATION = 15.0  # Reduced time for the short test
     STATE_SIZE = 13
     OBSTACLE_CLEARANCE = 0.3
-    
+
     # Trajectory Generation Parameters
     APPROACH_DISTANCE = 0.5  # Distance before/after gate to place waypoints
     NUM_INTERMEDIATE_POINTS = 5  # Number of points to generate through a gate
-    
-    # Detour constants are kept but logic is bypassed for this specific test
-    DETOUR_ANGLE_THRESHOLD = 120.0  
-    DETOUR_RADIUS = 0.65  
 
-    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env=None):
+    # Detour constants are kept but logic is bypassed for this specific test
+    DETOUR_ANGLE_THRESHOLD = 120.0
+    DETOUR_RADIUS = 0.65
+
+    def __init__(
+        self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env=None
+    ):
         """Initializes the controller, sets up state, and plans the first trajectory."""
         super().__init__(initial_obs, info, sim_config)
 
@@ -57,12 +58,12 @@ class MyController(Controller):
         # Flags for environment change detection
         self.__last_gate_flags = None
         self.__last_obstacle_flags = None
-        
+
         print("observation:", initial_obs)
 
         # --- TESTING MODIFICATION: ONLY KEEP FIRST GATE ---
         # We slice [:1] to ensure we only look at the first gate
-        self.__gate_positions = initial_obs["gates_pos"][:1] 
+        self.__gate_positions = initial_obs["gates_pos"][:1]
         self.__obstacle_positions = initial_obs["obstacles_pos"]
         self.__start_position = initial_obs["pos"]
 
@@ -78,7 +79,6 @@ class MyController(Controller):
 
     def __plan_initial_trajectory(self, initial_obs: dict[str, NDArray[np.floating]]):
         """Generates the Out-and-Back trajectory."""
-        
         # 1. Generate waypoints through the first gate (Forward Path)
         forward_path = self.__generate_gate_approach_points(
             self.__start_position,
@@ -89,11 +89,11 @@ class MyController(Controller):
         )
 
         # 2. Generate Return Path (Reverse the forward path)
-        # We slice [::-1] to reverse. 
-        # We also slice [1:] to avoid duplicating the turnaround point exactly, 
+        # We slice [::-1] to reverse.
+        # We also slice [1:] to avoid duplicating the turnaround point exactly,
         # though CubicSpline handles duplicates by assuming 0 velocity usually.
         return_path = forward_path[::-1]
-        
+
         # Combine: Start -> Gate -> Turnaround -> Gate -> Start
         full_path_points = np.vstack([forward_path, return_path[1:]])
 
@@ -254,7 +254,6 @@ class MyController(Controller):
         self, current_obs: dict[str, NDArray[np.floating]], simulation_time: float
     ) -> None:
         """Re-plans the Out-and-Back trajectory based on updated state."""
-        
         # --- TESTING MODIFICATION: Only grab the FIRST gate ---
         self.__gate_positions = current_obs["gates_pos"][:1]
         self.__gate_normals, self.__gate_y_axes, self.__gate_z_axes = self.__extract_gate_frames(

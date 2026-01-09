@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class SmartPathController(Controller):
-    """SmartPathController
+    """SmartPathController.
     -------------------
     An adaptive drone controller that generates a continuous, smooth trajectory
     through gates while actively avoiding obstacles and dynamically updating

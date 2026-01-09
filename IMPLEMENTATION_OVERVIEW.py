@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""
-SUMMARY OF MPC DEBUGGING IMPLEMENTATION
+"""SUMMARY OF MPC DEBUGGING IMPLEMENTATION.
 
 This script prints a complete overview of what was added to the controller.
 """
-
-import textwrap
 
 summary = """
 ╔════════════════════════════════════════════════════════════════════════════════╗

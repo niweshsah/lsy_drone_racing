@@ -2,7 +2,6 @@
 It is very similar to level2 controller but with added logic to replan the trajectory when it is inside the replan radius of any gate or obstacle.
 """  # noqa: D205
 
-
 from __future__ import annotations  # noqa: D100
 
 from typing import TYPE_CHECKING
@@ -87,7 +86,6 @@ class MyController(Controller):  # noqa: D101
         # 2. Add sharp-turn detours
         path_points = self.__add_detour_logic(
             path_points,
-            
             self.__gate_positions,
             self.__gate_normals,
             self.__gate_y_axes,
@@ -277,63 +275,58 @@ class MyController(Controller):  # noqa: D101
     #     self.__last_obstacle_flags = current_obstacle_flags
 
     #     return gate_newly_hit or obstacle_newly_hit
-    
-    
+
     def __check_for_env_update(self, current_obs: dict[str, NDArray[np.bool_]]) -> bool:
-            """Detects environment updates. Triggers a full re-plan if:
-            1. A new gate or obstacle has been formally visited/hit (State Transition).
-            2. The drone is dangerously close to ANY gate or obstacle (RWI Proximity Alert).
-            """  # noqa: D205
-            # --- 1. State Transition Check (Check for newly logged visits) ---
-            
-            # Initialize flags on the first run
-            if self.__last_gate_flags is None:
-                self.__last_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-                self.__last_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
-                return False  # No change yet
+        """Detects environment updates. Triggers a full re-plan if:
+        1. A new gate or obstacle has been formally visited/hit (State Transition).
+        2. The drone is dangerously close to ANY gate or obstacle (RWI Proximity Alert).
+        """  # noqa: D205
+        # --- 1. State Transition Check (Check for newly logged visits) ---
 
-            # Update current flags
-            current_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
-            current_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
+        # Initialize flags on the first run
+        if self.__last_gate_flags is None:
+            self.__last_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
+            self.__last_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
+            return False  # No change yet
 
-            # Check for any new True value in the flags array
-            gate_newly_hit = np.any((~self.__last_gate_flags) & current_gate_flags)
-            obstacle_newly_hit = np.any((~self.__last_obstacle_flags) & current_obstacle_flags)
+        # Update current flags
+        current_gate_flags = np.array(current_obs["gates_visited"], dtype=bool)
+        current_obstacle_flags = np.array(current_obs["obstacles_visited"], dtype=bool)
 
-            # Update the stored flags for the next iteration
-            self.__last_gate_flags = current_gate_flags
-            self.__last_obstacle_flags = current_obstacle_flags
-            
-            # --- 2. Reactive Proximity Check (RWI) ---
-            
-            drone_pos = current_obs["pos"]
-            
-            # A. Check Proximity to ALL Gates (3D Distance)
-            gate_positions_3d = current_obs["gates_pos"]
-            gate_distances = np.linalg.norm(gate_positions_3d - drone_pos, axis=1)
-            # Trigger if any gate, visited or unvisited, is too close
-            gate_proximity_alert = np.any(gate_distances < self.REPLAN_RADIUS)
+        # Check for any new True value in the flags array
+        gate_newly_hit = np.any((~self.__last_gate_flags) & current_gate_flags)
+        obstacle_newly_hit = np.any((~self.__last_obstacle_flags) & current_obstacle_flags)
 
-            # B. Check Proximity to ALL Obstacles (2D Distance, matching avoidance logic)
-            obstacle_positions_3d = current_obs["obstacles_pos"]
-            drone_pos_xy = drone_pos[:2]
-            obstacle_positions_xy = obstacle_positions_3d[:, :2]
-            
-            obstacle_distances = np.linalg.norm(obstacle_positions_xy - drone_pos_xy, axis=1)
-            # Trigger if any obstacle is too close
-            obstacle_proximity_alert = np.any(obstacle_distances < self.REPLAN_RADIUS)
-            
-            # --- 3. Final Trigger Decision ---
-            
-            # The planner is triggered if a state change occurred OR if the drone is in the danger zone.
-            return (
-                gate_newly_hit 
-                or obstacle_newly_hit 
-                or gate_proximity_alert 
-                or obstacle_proximity_alert
-            )
-        
-        
+        # Update the stored flags for the next iteration
+        self.__last_gate_flags = current_gate_flags
+        self.__last_obstacle_flags = current_obstacle_flags
+
+        # --- 2. Reactive Proximity Check (RWI) ---
+
+        drone_pos = current_obs["pos"]
+
+        # A. Check Proximity to ALL Gates (3D Distance)
+        gate_positions_3d = current_obs["gates_pos"]
+        gate_distances = np.linalg.norm(gate_positions_3d - drone_pos, axis=1)
+        # Trigger if any gate, visited or unvisited, is too close
+        gate_proximity_alert = np.any(gate_distances < self.REPLAN_RADIUS)
+
+        # B. Check Proximity to ALL Obstacles (2D Distance, matching avoidance logic)
+        obstacle_positions_3d = current_obs["obstacles_pos"]
+        drone_pos_xy = drone_pos[:2]
+        obstacle_positions_xy = obstacle_positions_3d[:, :2]
+
+        obstacle_distances = np.linalg.norm(obstacle_positions_xy - drone_pos_xy, axis=1)
+        # Trigger if any obstacle is too close
+        obstacle_proximity_alert = np.any(obstacle_distances < self.REPLAN_RADIUS)
+
+        # --- 3. Final Trigger Decision ---
+
+        # The planner is triggered if a state change occurred OR if the drone is in the danger zone.
+        return (
+            gate_newly_hit or obstacle_newly_hit or gate_proximity_alert or obstacle_proximity_alert
+        )
+
     def __regenerate_flight_plan(
         self, current_obs: dict[str, NDArray[np.floating]], simulation_time: float
     ) -> None:
@@ -563,7 +556,9 @@ class MyController(Controller):  # noqa: D101
         # trajectory is a CubicSpline object so calling it with time returns position
         if self.__check_for_env_update(current_obs):
             # This regenerates the entire spline based on new gate positions
-            self.__regenerate_flight_plan(current_obs, elapsed_time) # NOTE: elapsed_time must be defined first
+            self.__regenerate_flight_plan(
+                current_obs, elapsed_time
+            )  # NOTE: elapsed_time must be defined first
         # self.__regenerate_flight_plan(current_obs, elapsed_time)
 
         reference_position = self.__trajectory_spline(elapsed_time, nu=0)
