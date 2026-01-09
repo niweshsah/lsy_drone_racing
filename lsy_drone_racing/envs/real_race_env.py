@@ -160,7 +160,6 @@ class RealRaceCoreEnv:
         if options.get("check_drone_start_pos", True):
             pos = self.drones.pos[self.rank, ...]
             check_drone_start_pos(pos, self.randomizations, self.drone_name)
-
         self._reset_env_data(self.data)
         self._reset_drone()
 

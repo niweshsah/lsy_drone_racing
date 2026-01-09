@@ -49,9 +49,9 @@ class GeometryEngine:
         self.waypoints, self.wp_types, self.wp_normals = self._initialize_waypoints()
 
         # B. Insert Detour Points
-        self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
-            self.waypoints, self.wp_types, self.wp_normals
-        )
+        # self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
+        #     self.waypoints, self.wp_types, self.wp_normals
+        # )
 
         # C. Compute Tangents
         self.tangents = self._compute_hermite_tangents()
@@ -109,7 +109,7 @@ class GeometryEngine:
                         else:
                             detour_dir = proj / np.linalg.norm(proj)
 
-                        detour_pos = curr_p + (detour_dir * self.DETOUR_RADIUS) + (gate_norm * 1.5)
+                        detour_pos = curr_p + (detour_dir * self.DETOUR_RADIUS) + (gate_norm * 0.5)
                         new_wps.append(detour_pos)
                         new_types.append(2)
                         new_normals.append(np.zeros(3))
@@ -421,7 +421,39 @@ class GeometryEngine:
                         showlegend=first_obs,
                     )
                 )
-                first_obs = False
+
+        # --- 4b. Plot Gates as Rectangles ---
+        gate_size = 0.25  # Half-width/height of gate rectangle
+        for gate_idx, gate_pos in enumerate(self.gates_pos):
+            # Get gate orientation from normal, y, z vectors
+            normal = self.gate_normals[gate_idx]
+            y_vec = self.gate_y[gate_idx]
+            z_vec = self.gate_z[gate_idx]
+
+            # Create rectangle corners in local frame
+            corners = np.array([
+                [-gate_size, -gate_size, 0],
+                [gate_size, -gate_size, 0],
+                [gate_size, gate_size, 0],
+                [-gate_size, gate_size, 0],
+                [-gate_size, -gate_size, 0],
+            ])
+
+            # Transform to world frame: gate_pos + y*corner_y + z*corner_z
+            world_corners = gate_pos[:, np.newaxis] + y_vec[:, np.newaxis] * corners[:, 0] + z_vec[:, np.newaxis] * corners[:, 1]
+
+            fig.add_trace(
+                go.Scatter3d(
+                    x=world_corners[0],
+                    y=world_corners[1],
+                    z=world_corners[2],
+                    mode="lines",
+                    line=dict(color="blue", width=3),
+                    name=f"Gate {gate_idx}" if gate_idx == 0 else "",
+                    showlegend=(gate_idx == 0),
+                )
+            )
+            first_obs = False
 
         # --- 5. Plot Debug Vectors ---
         if len(self.debug_vectors) > 0:

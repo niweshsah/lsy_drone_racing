@@ -49,9 +49,9 @@ class GeometryEngine:
         self.waypoints, self.wp_types, self.wp_normals = self._initialize_waypoints()
 
         # B. Insert Detour Points
-        self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
-            self.waypoints, self.wp_types, self.wp_normals
-        )
+        # self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
+        #     self.waypoints, self.wp_types, self.wp_normals
+        # )
 
         # C. Compute Tangents
         self.tangents = self._compute_hermite_tangents()
@@ -371,6 +371,11 @@ class GeometryEngine:
                 name="Waypoints",
             )
         )
+
+        #plot gates
+
+        # for gate_pos in self.gates_pos:
+
 
         # --- 4. Plot Obstacles ---
         if len(self.obstacles_pos) > 0:

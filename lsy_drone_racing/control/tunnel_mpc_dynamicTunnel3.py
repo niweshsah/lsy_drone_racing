@@ -46,12 +46,16 @@ matplotlib.use("Agg")
 # ==============================================================================
 
 CONSTANTS = {
-    "v_max_ref": 1.5,  # m/s
-    "corner_acc": 1.95,  # m/s^2
+    "v_max_ref": 1.0,  # m/s
+    "corner_acc": 1.5,  # m/s^2
     "mpc_horizon": 50,  # Steps
-    "max_lateral_width": 0.26,  # m (Static Corridor width)
+    "max_lateral_width": 0.35,  # m (Static Corridor width)
     "safety_radius": 0.06,  # m (Obstacle buffer - Increased slightly for safety)
     "tf_horizon": 1.0,  # s
+    "detour_radius" : 0.5,
+    "gate_norm_detour": 0.5,
+    "tangent_scale_factor": 1.05
+
 }
 
 # ==============================================================================
@@ -120,6 +124,7 @@ def symbolic_dynamics_spatial(params: Dict[str, Any]) -> Tuple[ca.MX, ca.MX, ca.
     c_rpy = ca.DM(rpy_coef)
     c_drpy = ca.DM(rpy_rates_coef)
     c_cmd = ca.DM(cmd_rpy_coef)
+
     ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy
 
     thrust_mag = acc_coef + cmd_f_coef * T_c
@@ -176,8 +181,8 @@ def export_model(params: Dict[str, Any]) -> AcadosModel:
 class GeometryEngine:
     def __init__(self, gates_pos, gates_normals, start_pos):
         self.DETOUR_ANGLE_THRESHOLD = 60.0
-        self.DETOUR_RADIUS = 0.3
-        self.TANGENT_SCALE_FACTOR = 1.0
+        self.DETOUR_RADIUS = CONSTANTS['detour_radius']
+        self.TANGENT_SCALE_FACTOR = CONSTANTS['tangent_scale_factor']
 
         self.gates_pos = np.asarray(gates_pos, dtype=np.float64)
         self.gate_normals = np.asarray(gates_normals, dtype=np.float64)
@@ -218,6 +223,7 @@ class GeometryEngine:
                 gate_idx = i - 1
                 gate_norm = self.gate_normals[gate_idx]
                 vec_to_next = next_p - curr_p
+                
                 dist = np.linalg.norm(vec_to_next)
                 if dist > 1e-6:
                     vec_to_next /= dist
@@ -230,7 +236,7 @@ class GeometryEngine:
                             if np.linalg.norm(proj) > 1e-3
                             else np.array([0, 0, 1])
                         )
-                        detour_pos = curr_p + (detour_dir * self.DETOUR_RADIUS) + (gate_norm * 1.5)
+                        detour_pos = curr_p + (detour_dir * self.DETOUR_RADIUS) + (gate_norm * CONSTANTS['gate_norm_detour'])
                         new_wps.append(detour_pos)
                         new_types.append(2)
                         new_normals.append(np.zeros(3))
@@ -371,8 +377,12 @@ class SpatialMPC:
         nx, nu = 12, 4
         ny, ny_e = nx + nu, nx
 
+        # s, w1, w2, ds, dw1, dw2, rpy[0], rpy[1], rpy[2], drpy[0], drpy[1], drpy[2]
+
         q_diag = np.array([1.0, 20.0, 20.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
-        r_diag = np.array([5.0, 5.0, 5.0, 0.1])
+
+        # rpy and thrust
+        r_diag = np.array([50.0, 50.0, 50.0, 8.0])
 
         ocp.cost.W = scipy.linalg.block_diag(np.diag(q_diag), np.diag(r_diag))
         ocp.cost.W_e = np.diag(q_diag)
@@ -494,9 +504,11 @@ class SpatialMPCController(Controller):
         if self.env is None:
             return
         try:
+            # pass
             draw_line(self.env, points=self.global_viz_center, rgba=np.array([0.0, 1.0, 0.0, 0.5]))
-            draw_line(self.env, points=self.global_viz_left, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
-            draw_line(self.env, points=self.global_viz_right, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
+            # draw_line(self.env, points=self.global_viz_left, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
+            # draw_line(self.env, points=self.global_viz_right, rgba=np.array([1.0, 0.0, 0.0, 0.3]))
+            # pass
         except Exception:
             pass
 
