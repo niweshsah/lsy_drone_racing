@@ -379,7 +379,7 @@ class SpatialMPC:
 
         # s, w1, w2, ds, dw1, dw2, rpy[0], rpy[1], rpy[2], drpy[0], drpy[1], drpy[2]
 
-        q_diag = np.array([1.0, 20.0, 20.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
+        q_diag = np.array([1.0, 20.0, 20.0, 10.0, 5.0, 5.0, 1.0, 1.0, 3.0, 1, 1.0, 1.0])
 
         # rpy and thrust
         r_diag = np.array([50.0, 50.0, 50.0, 8.0])
