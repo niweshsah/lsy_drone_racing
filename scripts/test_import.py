@@ -140,7 +140,6 @@
 Comprehensive test script to verify all module imports
 """
 import sys
-from pprint import pprint
 
 print("=" * 60)
 print("TESTING MODULE IMPORTS")
