@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     from lsy_drone_racing.control.common_functions.yaml_import import load_yaml
-    from lsy_drone_racing.control.GeometryEngines.geometryEngine1 import GeometryEngine
+    from lsy_drone_racing.control.GeometryEngines.geometryEngine2 import GeometryEngine
     from lsy_drone_racing.control.model_dynamics.mpc1 import SpatialMPC, get_drone_params
     
     print("✅ All modules imported successfully!")
@@ -102,10 +102,24 @@ class SpatialMPCController(Controller):
             gates_list = info["gates"]
         gates_pos = [g["pos"] for g in gates_list]
         gates_normals = self._get_gate_normals(obs["gates_quat"])
+        gates_y, gates_z = self._get_gate_yz(obs["gates_quat"])
+        
+        starting_pos = obs["pos"]
+        print(f"Starting Position for Geometry Engine: {starting_pos}")
 
         # --- INITIALIZE GEOMETRY WITH OFFLINE CORRIDOR GENERATION ---
+        # self.geo = GeometryEngine(
+        #     gates_pos, gates_normals, obs["pos"], self.obstacles_pos, self.OBS_RADIUS
+        # )
+        
+        # start_pos = np.array(data["env"]["track"]["drones"][0]["pos"], dtype=np.float64)
+        # print("observations pos:", obs)
+        
+        # geom = GeometryEngine(g_pos, g_norm, g_y, g_z, obs_pos, s_pos, gate_dims=(0.3, 0.3))
+
+        
         self.geo = GeometryEngine(
-            gates_pos, gates_normals, obs["pos"], self.obstacles_pos, self.OBS_RADIUS
+            gates_pos, gates_normals, gates_y= gates_y, gates_z= gates_z, obstacles_pos= self.obstacles_pos, start_pos= starting_pos, gate_dims=(0.2, 0.2)
         )
 
         self.N_horizon = CONSTANTS["mpc_horizon"]
@@ -213,6 +227,10 @@ class SpatialMPCController(Controller):
     def _get_gate_normals(self, gates_quaternions):
         rotations = R.from_quat(gates_quaternions)
         return rotations.as_matrix()[:, :, 0]
+    
+    def _get_gate_yz(self, gates_quaternions):
+        rotations = R.from_quat(gates_quaternions)
+        return rotations.as_matrix()[:, :, 1], rotations.as_matrix()[:, :, 2]
 
     def reset_mpc_solver(self):
         nx = 12

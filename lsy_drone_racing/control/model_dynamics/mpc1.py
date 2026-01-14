@@ -171,7 +171,7 @@ class SpatialMPC:
 
         # Cost Matrices
         # s (1), w1 (2), w2 (3), ds (4), dw1 (5), dw2 (6), phi (7), theta (8), psi (9), dphi (10), dtheta (11), dpsi (12)
-        q_diag = np.array([1.0, 0.1, 0.1, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
+        q_diag = np.array([1.0, 10.0, 10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
         #
         r_diag = np.array([5.0, 5.0, 5.0, 0.1])
 

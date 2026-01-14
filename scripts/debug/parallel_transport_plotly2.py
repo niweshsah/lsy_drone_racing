@@ -520,8 +520,8 @@ def load_from_toml(filepath: str):
 
 
 if __name__ == "__main__":
-    toml_path = "config/level1.toml"
-    # toml_path = "config/level1_noObstacle.toml"
+    # toml_path = "config/level1.toml"
+    toml_path = "config/level1_noObstacle.toml"
 
     # Fallback Test Case
     s_pos = [0, -4, 0]

@@ -27,7 +27,7 @@ drone_model = "cf21B_500"                         # Model of the drone, i.e., cf
 # "so_rpy": Simplified identified model.
 # "so_rpy_rotor": Simplified identified model with rotor dynamics.
 # "so_rpy_rotor_drag": Simplified identified model with rotor dynamics and drag.
-physics = "first_principles"
+physics = "so_rpy"
 drone_model = "cf21B_500"                         # Model of the drone, i.e., cf2x_L250, cf2x_P250, cf2x_T500, cf21B_500. For this course, we use cf21B_500
 camera_view = [5.0, 180.0, -25.0, 0.0, 0.0, 0.0] # Camera view [distance, azimuth, elevation, lookat_x, lookat_y, lookat_z]
 freq = 500                                        # Simulation frequency, in Hz
@@ -54,10 +54,11 @@ pos = [1.05, 0.75, 1.2]
 rpy = [0.0, 0.0, 2.35]
 [[env.track.gates]]
 pos = [-1.0, -0.25, 0.7]
-rpy = [0.0, 0.0, -1.57]
+rpy = [0.0, 0.0, 3.14]
 [[env.track.gates]]
 pos = [0.0, -0.75, 1.2]
 rpy = [0.0, 0.0, 0.0]
+
 
 # Obstacle height: 1.52m + reflective marker on top. Height is measured from the ground to the top of the obstacle.
 # --- OBSTACLES MOVED OUT OF BOUNDS ---

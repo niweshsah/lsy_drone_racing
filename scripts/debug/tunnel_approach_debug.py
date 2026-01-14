@@ -39,6 +39,8 @@ class TrajectoryGenerator:
         path_points = self._generate_gate_approach_points(
             self.start_pos, self.gates_pos, self.gate_normals
         )
+        
+        print("path points:", path_points)
 
         # 2. Detours (The complex logic from your controller)
         path_points = self._add_detour_logic(
@@ -57,7 +59,7 @@ class TrajectoryGenerator:
         return spline
 
     def _generate_gate_approach_points(
-        self, initial_pos, gate_pos, gate_norm, approach_dist=0.5, num_pts=5
+        self, initial_pos, gate_pos, gate_norm, approach_dist=0.5, num_pts=2
     ):
         offsets = np.linspace(-approach_dist, approach_dist, num_pts)
         gate_pos_exp = gate_pos[:, np.newaxis, :]
