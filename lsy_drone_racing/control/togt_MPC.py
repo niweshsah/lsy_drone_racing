@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     from lsy_drone_racing.control.common_functions.yaml_import import load_yaml
-    from lsy_drone_racing.control.GeometryEngines.geometryEngine2 import GeometryEngine
+    from lsy_drone_racing.control.GeometryEngines.geometryEngine3 import GeometryEngine
     from lsy_drone_racing.control.model_dynamics.mpc1 import SpatialMPC, get_drone_params
     
     print("✅ All modules imported successfully!")
@@ -119,7 +119,7 @@ class SpatialMPCController(Controller):
 
         
         self.geo = GeometryEngine(
-            gates_pos, gates_normals, gates_y= gates_y, gates_z= gates_z, obstacles_pos= self.obstacles_pos, start_pos= starting_pos, gate_dims=(0.2, 0.2)
+            gates_pos, gates_normals, gates_y= gates_y, gates_z= gates_z, obstacles_pos= self.obstacles_pos, start_pos= starting_pos, gate_dims=(0.2, 0.2), initial_obs= obs, info = info, sim_config = config
         )
 
         self.N_horizon = CONSTANTS["mpc_horizon"]

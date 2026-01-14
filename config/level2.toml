@@ -64,7 +64,7 @@ pos = [0.0, 0.75, 1.55]
 [[env.track.obstacles]]
 pos = [1.0, 0.25, 1.55]
 [[env.track.obstacles]]
-pos = [-1.5, -0.25, 1.55]
+pos = [-1.5, -2.25, 1.55]
 [[env.track.obstacles]]
 pos = [-0.5, -0.75, 1.55]
 

@@ -3,8 +3,8 @@ constants:
   v_max_ref: 1.75            # m/s
   corner_acc: 1.75           # m/s^2
   mpc_horizon: 200           # Steps
-  max_lateral_width: 0.05   # m (Static Corridor width)
-  safety_radius: 0.06       # m (Obstacle buffer)
+  max_lateral_width: 0.21   # m (Static Corridor width)
+  safety_radius: 0.1       # m (Obstacle buffer)
   tf_horizon: 1.0           # s
   detour_radius: 0.5
   gate_norm_detour: 0.5

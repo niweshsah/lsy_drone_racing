@@ -55,10 +55,10 @@ class GeometryEngine:
         self.tangents = self._compute_adaptive_tangents() # [UPDATED NAME]
         
         # Spline Generation
-        dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
-        self.s_knots = np.insert(np.cumsum(dists), 0, 0.0)
-        self.total_length = self.s_knots[-1]
-        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents)
+        dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1) # array of SL different b/w each waypoint
+        self.s_knots = np.insert(np.cumsum(dists), 0, 0.0) # cumulative s at each waypoint
+        self.total_length = self.s_knots[-1] # total dist of the path
+        self.spline = CubicHermiteSpline(self.s_knots, self.waypoints, self.tangents) # fit spline on the distance
 
         # Frame and Corridor
         num_frame_points = int(self.total_length * 100)
@@ -150,6 +150,11 @@ class GeometryEngine:
         normals = [np.zeros(3)]
 
         for i in range(len(self.optimal_pass_points)):
+            
+            # wps.append(self.optimal_pass_points[i] - self.gate_normals[i] * 0.25)
+            # types.append(2) # 0 = Start/Normal
+            # normals.append(np.zeros(3))
+            
             wps.append(self.optimal_pass_points[i])
             types.append(1) # 1 = Gate
             normals.append(self.gate_normals[i])
