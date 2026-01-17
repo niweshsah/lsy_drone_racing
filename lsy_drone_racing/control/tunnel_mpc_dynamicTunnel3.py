@@ -48,7 +48,7 @@ matplotlib.use("Agg")
 CONSTANTS = {
     "v_max_ref": 1.0,  # m/s
     "corner_acc": 1.5,  # m/s^2
-    "mpc_horizon": 50,  # Steps
+    "mpc_horizon": 100,  # Steps
     "max_lateral_width": 0.35,  # m (Static Corridor width)
     "safety_radius": 0.06,  # m (Obstacle buffer - Increased slightly for safety)
     "tf_horizon": 1.0,  # s
@@ -189,9 +189,9 @@ class GeometryEngine:
         self.start_pos = np.asarray(start_pos, dtype=np.float64)
 
         self.waypoints, self.wp_types, self.wp_normals = self._initialize_waypoints()
-        self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
-            self.waypoints, self.wp_types, self.wp_normals
-        )
+        # self.waypoints, self.wp_types, self.wp_normals = self._add_detour_logic(
+        #     self.waypoints, self.wp_types, self.wp_normals
+        # )
         self.tangents = self._compute_hermite_tangents()
 
         dists = np.linalg.norm(np.diff(self.waypoints, axis=0), axis=1)
