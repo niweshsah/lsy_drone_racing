@@ -1,7 +1,27 @@
-"""Merged Controller: MPC implementation following a Dynamic Spline Trajectory.
+"""
+Hybrid Drone Racing Controller: Dynamic Spline Planning with NMPC Tracking.
 
-Combines Level 3 replanning/obstacle avoidance with Acados NMPC for the
-LSY Drone Racing Gym environment.
+This module implements a two-layer control architecture for autonomous drone racing:
+
+1. High-Level Trajectory Planner:
+   - Dynamically generates a smooth 3D trajectory using Cubic Splines.
+   - Computes gate-aligned approach waypoints and handles sharp turns via detour logic.
+   - Implements a bisector-based obstacle avoidance algorithm to modify path geometry 
+     in real-time based on environmental feedback.
+
+2. Low-Level NMPC Tracker:
+   - Utilizes the Acados framework to solve a Nonlinear Model Predictive Control 
+     problem over a sliding time horizon.
+   - Synchronizes spline sampling with the MPC shooting nodes to minimize tracking 
+     error across position, velocity, and orientation.
+   - Respects physical drone constraints (thrust limits, tilt angles) while 
+     maintaining high-frequency control throughput.
+
+The architecture ensures reactive replanning when obstacles are detected or gates 
+are cleared, providing a robust balance between aggressive racing and safety.
+
+Author: Niwesh Sah
+Email: sahniwesh@gmail.com
 """
 
 from __future__ import annotations
@@ -210,8 +230,10 @@ class TrajectoryPlanner:
 
         angle = np.degrees(np.arctan2(np.dot(v_proj, z_axis), np.dot(v_proj, y_axis)))
         
-        if -90 <= angle < 45: return y_axis     # Right
-        if 45 <= angle < 135: return z_axis     # Top
+        if -90 <= angle < 45:
+            return y_axis     # Right
+        if 45 <= angle < 135:
+            return z_axis     # Top
         return -y_axis                          # Left
 
     def _avoid_obstacles(self, path_points: NDArray, obstacles: NDArray) -> Tuple[NDArray, NDArray]:
