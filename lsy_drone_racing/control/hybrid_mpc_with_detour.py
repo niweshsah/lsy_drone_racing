@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 @dataclass
 class PlannerConfig:
     """Configuration parameters for the Trajectory Planner."""
-    flight_duration: float = 9.0
+    flight_duration: float = 10.0
     replan_radius: float = 1.0
     obstacle_clearance: float = 0.3
     gate_approach_dist: float = 0.5
