@@ -43,10 +43,10 @@ class GeometryEngine:
         self.info = info
         self.sim_config = sim_config
         self.POLE_HEIGHT = 3.0  # Meters
-        self.SAFETY_RADIUS = 0.1  # Meters
-        self.MAX_LATERAL_WIDTH = 1.8  # Meters
+        self.SAFETY_RADIUS = 0.05  # Meters
+        self.MAX_LATERAL_WIDTH = 0.35  # Meters
         self.CONTRACTION_LEN = 0.3  # Meters
-        self.CLEARANCE_RADIUS = 0.25  # Meters for obstacle avoidance
+        self.CLEARANCE_RADIUS = 0.2  # Meters for obstacle avoidance
 
         self.debug_dicts = []
         
@@ -185,8 +185,8 @@ class GeometryEngine:
         waypoints = [self.start_pos]
         
         # Tuning parameters for the geometry
-        EXTENSION_DIST = 0.28  # How far to fly straight out after a reversal gate
-        TURN_RADIUS = 0.28    # How wide the U-turn should be
+        EXTENSION_DIST = 0.2  # How far to fly straight out after a reversal gate
+        TURN_RADIUS = 0.3    # How wide the U-turn should be
         APPROACH_DIST = 0.5   # Distance for pre/post gate guidance
 
         for idx, gate_pos in enumerate(self.gates_pos):
@@ -393,8 +393,6 @@ class GeometryEngine:
             mid = (lb_w1[collapsed] + ub_w1[collapsed]) / 2
             lb_w1[collapsed] = mid - 0.05
             ub_w1[collapsed] = mid + 0.05
-            
-            print(f"[Geometry] Warning: Collapsed corridor at {np.sum(collapsed)} points. Adjusted to minimal width.")
         return {"lb_w1": lb_w1, "ub_w1": ub_w1}
 
     def __get_spline(self, points: NDArray[np.floating]) -> CubicHermiteSpline:
@@ -589,36 +587,36 @@ class GeometryEngine:
                 first_obs = False
 
         # --- 5. Plot Corridor Bounds ---
-        step = 5
-        p_vis = path[::step]
-        n1_vis = self.pt_frame["n1"][::step]
-        idx = np.arange(0, len(path), step)
-        lb = self.corridor_map["lb_w1"][idx]
-        ub = self.corridor_map["ub_w1"][idx]
+        # step = 5
+        # p_vis = path[::step]
+        # n1_vis = self.pt_frame["n1"][::step]
+        # idx = np.arange(0, len(path), step)
+        # lb = self.corridor_map["lb_w1"][idx]
+        # ub = self.corridor_map["ub_w1"][idx]
 
-        wall_left = p_vis + (n1_vis * ub[:, np.newaxis])
-        wall_right = p_vis + (n1_vis * lb[:, np.newaxis])
+        # wall_left = p_vis + (n1_vis * ub[:, np.newaxis])
+        # wall_right = p_vis + (n1_vis * lb[:, np.newaxis])
 
-        fig.add_trace(
-            go.Scatter3d(
-                x=wall_left[:, 0],
-                y=wall_left[:, 1],
-                z=wall_left[:, 2],
-                mode="lines",
-                line=dict(color="red", width=2),
-                name="Bound L",
-            )
-        )
-        fig.add_trace(
-            go.Scatter3d(
-                x=wall_right[:, 0],
-                y=wall_right[:, 1],
-                z=wall_right[:, 2],
-                mode="lines",
-                line=dict(color="red", width=2),
-                name="Bound R",
-            )
-        )
+        # fig.add_trace(
+        #     go.Scatter3d(
+        #         x=wall_left[:, 0],
+        #         y=wall_left[:, 1],
+        #         z=wall_left[:, 2],
+        #         mode="lines",
+        #         line=dict(color="red", width=2),
+        #         name="Bound L",
+        #     )
+        # )
+        # fig.add_trace(
+        #     go.Scatter3d(
+        #         x=wall_right[:, 0],
+        #         y=wall_right[:, 1],
+        #         z=wall_right[:, 2],
+        #         mode="lines",
+        #         line=dict(color="red", width=2),
+        #         name="Bound R",
+        #     )
+        # )
 
         fig.update_layout(
             title="Interactive Flight Corridor (With Gates & Avoidance)",

@@ -6,6 +6,8 @@ import casadi as ca
 import numpy as np
 import scipy.linalg
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
+from lsy_drone_racing.control.common_functions.yaml_import import load_yaml
+
 
 # Simulation Environment Imports
 try:
@@ -28,6 +30,15 @@ except ImportError:
 
     class Controller:
         pass
+    
+    
+CONSTANTS = load_yaml("lsy_drone_racing/control/constants.yaml")
+print(f"Loaded constants: {CONSTANTS.keys()}")
+MPC_PARAMS = CONSTANTS['mpc_wts']
+
+state_params = MPC_PARAMS['state_wts']
+control_params = MPC_PARAMS['control_wts']
+bound_cost = MPC_PARAMS.get('mpc_bound_cost', 1000.0)
 
 
 def get_drone_params() -> Dict[str, Any]:
@@ -51,25 +62,32 @@ def get_drone_params() -> Dict[str, Any]:
     }
 
 
-def symbolic_dynamics_spatial(params: Dict[str, Any]) -> Tuple[ca.MX, ca.MX, ca.MX, ca.MX]:
-    mass = params["mass"]
-    gravity_vec = params["gravity_vec"]
-    acc_coef = params["acc_coef"]
-    cmd_f_coef = params["cmd_f_coef"]
-    rpy_coef = params["rpy_coef"]
-    rpy_rates_coef = params["rpy_rates_coef"]
-    cmd_rpy_coef = params["cmd_rpy_coef"]
 
-    # State: [s, w1, w2, ds, dw1, dw2, phi, theta, psi, dphi, dtheta, dpsi]
+def symbolic_dynamics_spatial(
+    mass: float,
+    gravity_vec: np.ndarray,
+    J: np.ndarray,
+    J_inv: np.ndarray,
+    acc_coef: float,
+    cmd_f_coef: float,
+    rpy_coef: list,
+    rpy_rates_coef: list,
+    cmd_rpy_coef: list,
+) -> tuple[ca.MX, ca.MX, ca.MX, ca.MX]:
+    # --- 1. State Vector X (12 States) ---
+    # [cite: 302] States: s, w1, w2, ds, dw1, dw2, phi, theta, psi, dphi, dtheta, dpsi
     s, w1, w2 = ca.SX.sym("s"), ca.SX.sym("w1"), ca.SX.sym("w2")
     ds, dw1, dw2 = ca.SX.sym("ds"), ca.SX.sym("dw1"), ca.SX.sym("dw2")
+
     phi, theta, psi = ca.SX.sym("phi"), ca.SX.sym("theta"), ca.SX.sym("psi")
     dphi, dtheta, dpsi = ca.SX.sym("dphi"), ca.SX.sym("dtheta"), ca.SX.sym("dpsi")
+
     rpy = ca.vertcat(phi, theta, psi)
     drpy = ca.vertcat(dphi, dtheta, dpsi)
+
     X = ca.vertcat(s, w1, w2, ds, dw1, dw2, rpy, drpy)
 
-    # Input
+    # --- 2. Control Input U (4 Inputs) ---
     phi_c, theta_c, psi_c, T_c = (
         ca.SX.sym("phi_c"),
         ca.SX.sym("theta_c"),
@@ -79,35 +97,50 @@ def symbolic_dynamics_spatial(params: Dict[str, Any]) -> Tuple[ca.MX, ca.MX, ca.
     cmd_rpy = ca.vertcat(phi_c, theta_c, psi_c)
     U = ca.vertcat(cmd_rpy, T_c)
 
-    # Parameters
+    # --- 3. Parameters P (13 Elements) ---
+    # [cite: 299] Dependencies on t, n1, n2, k1, k2 and their derivatives
     t_vec = ca.SX.sym("t_vec", 3)
     n1_vec = ca.SX.sym("n1_vec", 3)
     n2_vec = ca.SX.sym("n2_vec", 3)
     k1, k2 = ca.SX.sym("k1"), ca.SX.sym("k2")
-    dk1, dk2 = ca.SX.sym("dk1"), ca.SX.sym("dk2")
+    dk1, dk2 = ca.SX.sym("dk1"), ca.SX.sym("dk2")  # Spatial derivatives of curvature
+
+    # ORDER MATTERS: This must match the order in the Controller loop exactly
     P = ca.vertcat(t_vec, n1_vec, n2_vec, k1, k2, dk1, dk2)
 
-    # Dynamics
+    # --- 4. Physics Engine ---
+
+    # A. Rotational Dynamics (Fitted Linear Model)
+    # ddrpy = Stiffness * angle + Damping * rate + Gain * command
     c_rpy = ca.DM(rpy_coef)
     c_drpy = ca.DM(rpy_rates_coef)
     c_cmd = ca.DM(cmd_rpy_coef)
-    ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy  # This is very important!
 
+    ddrpy = c_rpy * rpy + c_drpy * drpy + c_cmd * cmd_rpy
+
+    # B. Translational Acceleration (Inertial Frame)
     thrust_mag = acc_coef + cmd_f_coef * T_c
     F_body = ca.vertcat(0, 0, thrust_mag)
 
+    # Rotation Matrix (Body -> Inertial)
     cx, cy, cz = ca.cos(phi), ca.cos(theta), ca.cos(psi)
     sx, sy, sz = ca.sin(phi), ca.sin(theta), ca.sin(psi)
+
     R_IB = ca.vertcat(
         ca.horzcat(cy * cz, cz * sx * sy - cx * sz, sx * sz + cx * cz * sy),
         ca.horzcat(cy * sz, cx * cz + sx * sy * sz, cx * sy * sz - cz * sx),
         ca.horzcat(-sy, cy * sx, cx * cy),
     )
 
+    # Global Acceleration
     g_vec_sym = ca.DM(gravity_vec)
     acc_world = g_vec_sym + (R_IB @ F_body) / mass
 
+    # C. Spatial Dynamics Reconstruction
+    # h is the scaling factor for path curvature
     h = 1 - k1 * w1 - k2 * w2
+
+    # h_dot requires dk1/dk2 (Chain rule: d/dt = d/ds * ds/dt)
     h_dot = -(k1 * dw1 + k2 * dw2 + (dk1 * w1 + dk2 * w2) * ds)
 
     coriolis = (
@@ -118,17 +151,39 @@ def symbolic_dynamics_spatial(params: Dict[str, Any]) -> Tuple[ca.MX, ca.MX, ca.
         - (ds * dw2 * k2) * t_vec
     )
 
+    # Project World Acceleration onto Path Frame
     proj_t = ca.dot(t_vec, acc_world - coriolis)
     dds = proj_t / h
     ddw1 = ca.dot(n1_vec, acc_world - coriolis)
     ddw2 = ca.dot(n2_vec, acc_world - coriolis)
 
-    X_Dot = ca.vertcat(ds, dw1, dw2, dds, ddw1, ddw2, drpy, ddrpy)
+    # --- 5. Final Time Derivative ---
+    X_Dot = ca.vertcat(
+        ds,  # s_dot
+        dw1,  # w1_dot
+        dw2,  # w2_dot
+        dds,  # s_ddot
+        ddw1,  # w1_ddot
+        ddw2,  # w2_ddot
+        drpy,  # rpy_dot
+        ddrpy,  # rpy_ddot
+    )
+
     return X_Dot, X, U, P
 
 
 def export_model(params: Dict[str, Any]) -> AcadosModel:
-    X_dot, X, U, P = symbolic_dynamics_spatial(params)
+    X_dot, X, U, P = symbolic_dynamics_spatial(
+        mass=params["mass"],
+        gravity_vec=params["gravity_vec"],
+        J=params["J"],
+        J_inv=params.get("J_inv"),
+        acc_coef=params["acc_coef"],
+        cmd_f_coef=params["cmd_f_coef"],
+        rpy_coef=params["rpy_coef"],
+        rpy_rates_coef=params["rpy_rates_coef"],
+        cmd_rpy_coef=params["cmd_rpy_coef"],
+    )
     model = AcadosModel()
     model.name = "spatial_mpc_drone"
     model.f_expl_expr = X_dot
@@ -171,9 +226,14 @@ class SpatialMPC:
 
         # Cost Matrices
         # s (1), w1 (2), w2 (3), ds (4), dw1 (5), dw2 (6), phi (7), theta (8), psi (9), dphi (10), dtheta (11), dpsi (12)
-        q_diag = np.array([1.0, 10.0, 10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
+        # q_diag = np.array([1.0, 10.0, 10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
+        q_diag = np.array([state_params['s'], state_params['w1'], state_params['w2'], state_params['ds'],
+                          state_params['dw1'], state_params['dw2'], state_params['phi'],
+                          state_params['theta'], state_params['psi'], state_params['dphi'],
+                          state_params['dtheta'], state_params['dpsi']])
         #
-        r_diag = np.array([5.0, 5.0, 5.0, 0.1])
+        # r_diag = np.array([5.0, 5.0, 5.0, 0.1])
+        r_diag = np.array([control_params['roll_cmd'], control_params['pitch_cmd'], control_params['yaw_cmd'], control_params['thrust_cmd']])
 
         ocp.cost.W = scipy.linalg.block_diag(np.diag(q_diag), np.diag(r_diag))
         ocp.cost.W_e = np.diag(q_diag)
@@ -200,7 +260,7 @@ class SpatialMPC:
 
         ns = 2
         ocp.constraints.idxsbx = np.array([0, 1])
-        BIG_COST = 1000.0
+        BIG_COST = bound_cost
         ocp.cost.zl = BIG_COST * np.ones(ns)
         ocp.cost.zu = BIG_COST * np.ones(ns)
         ocp.cost.Zl = BIG_COST * np.ones(ns)

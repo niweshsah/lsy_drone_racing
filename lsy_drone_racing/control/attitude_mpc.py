@@ -329,6 +329,9 @@ class AttitudeMPC(Controller):
 
         # set thrust reference to hover thrust
         yref[:, 15] = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+        
+        thrust = self.drone_params["mass"] * -self.drone_params["gravity_vec"][-1]
+        print(f"[MPC] Step {self._tick}: Setting thrust reference to hover thrust: {thrust:.2f} N")
 
         # print("desired thrust:", yref[0, 15], " min thrust:", self.drone_params["thrust_min"] * 4, " max thrust:", self.drone_params["thrust_max"] * 4)
 
