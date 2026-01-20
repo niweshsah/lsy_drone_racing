@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 @dataclass
 class PlannerConfig:
     """Configuration parameters for the Trajectory Planner."""
-    flight_duration: float = 5.0
+    flight_duration: float = 9.0
     replan_radius: float = 1.0
     obstacle_clearance: float = 0.3
     gate_approach_dist: float = 0.5
@@ -70,7 +70,7 @@ class PlannerConfig:
 class MpcConfig:
     """Configuration parameters for the NMPC Controller."""
     T_horizon: float = 2.0  # Time horizon in seconds
-    N_horizon: int = 20     # Number of shooting nodes
+    N_horizon: int = 50     # Number of shooting nodes
     
     # Weights
     Q_pos: float = 100.0
