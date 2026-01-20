@@ -163,23 +163,7 @@ class SpatialMPCController(Controller):
             return
 
         try:
-            # draw_line expects points in sequence.
-            # We create a list [start1, end1, start2, end2, ...]
-            # Note: draw_line implementation varies. If it connects all points, this might look zig-zaggy.
-            # Assuming draw_line takes segment pairs or we call it per segment.
-            # For efficiency in some envs, we'll try to batch if possible, or loop.
-
-            # If draw_line connects sequence, we use the nan trick or just loop.
-            # Given we likely can't use NaN in this specific draw_line wrapper without knowing internals,
-            # we will assume we can pass a list of pairs if modified, OR we loop.
-
-            # Safe approach: Plot points. If draw_line connects them, it might be messy.
-            # Ideally, draw_line handles `mode="lines"` (segments).
-            # If not, we iterate.
-
-            # Since we want to be safe and `draw_line` usually connects points sequentially:
-            # We will grab just the last few vectors to avoid clutter/lag, or just loop.
-
+            
             for start, end in self.geo.debug_vectors:
                 draw_line(
                     self.env, points=np.array([start, end]), rgba=np.array([0.0, 1.0, 1.0, 0.8])
@@ -221,6 +205,85 @@ class SpatialMPCController(Controller):
                 self.mpc.solver.set(k, "u", np.array([0, 0, 0, hover_T]))
 
         self.prev_s = 0.0
+        
+    def __compute_corridor_bounds(self, s_pred, frame_pos, frame_t, frame_n1, frame_n2):  # noqa: ANN202
+        """Computes dynamic [lb, ub] for w1 and w2 at a specific path location s.
+        Projects 'thin rod' obstacles onto the transverse plane.
+        """  # noqa: D205
+        # 1. Initialize with full corridor width
+        # [cite: 322-323] Initial flight corridor defined by max safety distance
+        lb_w1, ub_w1 = -self.W1_MAX, self.W1_MAX
+        lb_w2, ub_w2 = -self.W2_MAX, self.W2_MAX
+
+        # Sensitivity: How far along s (longitudinal) do we care about an obstacle?
+        # A thin rod is only relevant when we are passing right next to it.
+        longitudinal_threshold = 0.3
+        
+        for gate_idx, gate_pos in enumerate(self.gates_pos):
+            # Vector from Path Center -> Gate
+            r_vec = gate_pos - frame_pos
+            d = np.linalg.norm(r_vec)
+
+            # Project onto Tangent (s-direction)
+            s_dist = np.dot(r_vec, frame_t)
+
+            if abs(s_dist) > longitudinal_threshold:
+                continue  # Gate too far along s to affect bounds
+            
+            if d > longitudinal_threshold:
+                continue  # Gate too far laterally to affect bounds
+            
+            # Project onto Transverse Plane (n1, n2) [cite: 329]
+            w1_gate = np.dot(r_vec, frame_n1)
+            w2_gate = np.dot(r_vec, frame_n2)
+            
+            # --- Gate Avoidance Logic ---
+            # For vertical gates, we primarily check w1 (lateral)
+            # Check if gate is actually inside our max corridor
+                
+
+        for obs_pos in self.obstacles_pos:
+            # Vector from Path Center -> Obstacle
+            r_vec = obs_pos - frame_pos
+
+            # Project onto Tangent (s-direction)
+            # We only constrain the corridor if the obstacle is "at this slice" of s
+            s_dist = np.dot(r_vec, frame_t)
+
+            if abs(s_dist) < longitudinal_threshold:
+                # Project onto Transverse Plane (n1, n2) [cite: 329]
+                w1_obs = np.dot(r_vec, frame_n1)
+                w2_obs = np.dot(r_vec, frame_n2)
+
+                # --- Dominant Side Logic [cite: 351] ---
+                # For vertical rods, we primarily check w1 (lateral)
+
+                # Check if obstacle is actually inside our max corridor
+                if (lb_w1 < w1_obs < ub_w1) and (lb_w2 < w2_obs < ub_w2):
+                    # DECISION: Pass Left or Pass Right?
+                    # If rod is to the LEFT of path center (w1 > 0), we must pass RIGHT.
+                    # We trim the UPPER bound of w1.
+                    if w1_obs > 0:
+                        dist_to_surface = w1_obs - self.OBS_RADIUS
+                        # Determine new upper bound, don't let it exceed current
+                        ub_w1 = min(ub_w1, dist_to_surface)
+
+                    # If rod is to the RIGHT of path center or at center (w1 <= 0), we must pass LEFT.
+                    # We trim the LOWER bound of w1.
+                    else:
+                        dist_to_surface = w1_obs + self.OBS_RADIUS
+                        lb_w1 = max(lb_w1, dist_to_surface)
+
+                    # Note: For vertical rods, w2 (height) bounds usually don't change
+                    # unless it's a horizontal bar.
+
+        # Ensure bounds are valid (lb < ub). If a gap closes, force a tiny gap to avoid solver crash.
+        if lb_w1 >= ub_w1:
+            mid = (lb_w1 + ub_w1) / 2
+            lb_w1 = mid - 0.05
+            ub_w1 = mid + 0.05
+
+        return np.array([lb_w1, lb_w2]), np.array([ub_w1, ub_w2])
 
     def compute_control(self, obs: Dict, info: Optional[Dict] = None) -> np.ndarray:
         self._draw_global_track()
@@ -318,7 +381,7 @@ class SpatialMPCController(Controller):
                 for k in range(self.mpc.N + 1):
                     x_k = self.mpc.solver.get(k, "x")
                     mpc_points.append(self._spatial_to_cartesian(x_k[0], x_k[1], x_k[2]))
-                draw_line(self.env, points=np.array(mpc_points), rgba=np.array([0.0, 0.0, 1.0, 0.8]))
+                # draw_line(self.env, points=np.array(mpc_points), rgba=np.array([0.0, 0.0, 1.0, 0.8]))
                 # draw_line(self.env, points=np.array(vis_dynamic_left), rgba=np.array([1.0, 0.5, 0.0, 0.9]))
                 # draw_line(self.env, points=np.array(vis_dynamic_right), rgba=np.array([1.0, 0.5, 0.0, 0.9]))
             except Exception:

@@ -26,7 +26,7 @@ class MyController(Controller):  # noqa: D101
     VIZ_SAMPLES = 100
     LOG_FREQ = 100
 
-    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict):
+    def __init__(self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env = None):
         """Initializes the controller, sets up state, and plans the first trajectory."""
         # Call base constructor using super()
         super().__init__(initial_obs, info, sim_config)

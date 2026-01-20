@@ -27,7 +27,7 @@ if __name__ == "__main__":
 
     gates_pos, gates_normals, gates_y, gates_z, obstacles_pos, start_pos = load_from_toml(toml_path)
 
-    gate_size = 1
+    gate_size = 0.5
 
     geometry_engine = GeometryEngine(
         gates_pos=gates_pos.tolist(),

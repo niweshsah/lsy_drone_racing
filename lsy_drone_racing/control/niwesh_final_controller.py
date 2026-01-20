@@ -17,7 +17,7 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 from drone_models.core import load_params
 from drone_models.so_rpy import symbolic_dynamics_euler
 from drone_models.utils.rotation import ang_vel2rpy_rates
-from lsy_drone_racing.control import Controller
+from lsy_drone_racing.control.controller import Controller
 from lsy_drone_racing.utils.utils import draw_line
 
 if TYPE_CHECKING:
@@ -74,8 +74,8 @@ def create_ocp_solver(
     # Weights
     Q = np.diag(
         [
-            50.0,
-            50.0,
+            100.0,
+            100.0,
             400.0,  # Position (x, y, z)
             1.0,
             1.0,
@@ -164,12 +164,12 @@ class MPCSplineController(Controller):
     """
 
     # Planner Constants
-    FLIGHT_DURATION = 25.0
-    REPLAN_RADIUS = 0.5
-    OBSTACLE_CLEARANCE = 0.2
+    FLIGHT_DURATION = 10.0
+    REPLAN_RADIUS = 0.7
+    OBSTACLE_CLEARANCE = 0.3
 
     # MPC Constants
-    MPC_HORIZON_STEPS = 25  # N
+    MPC_HORIZON_STEPS = 100  # N
 
     def __init__(
         self, initial_obs: dict[str, NDArray[np.floating]], info: dict, sim_config: dict, env=None

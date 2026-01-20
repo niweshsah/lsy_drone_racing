@@ -44,10 +44,13 @@ class GeometryEngine:
         self.sim_config = sim_config
         self.POLE_HEIGHT = 3.0  # Meters
         self.SAFETY_RADIUS = 0.1  # Meters
-        self.MAX_LATERAL_WIDTH = 1.8  # Meters
+        self.MAX_LATERAL_WIDTH = 0.2  # Meters
         self.CONTRACTION_LEN = 0.3  # Meters
         self.CLEARANCE_RADIUS = 0.25  # Meters for obstacle avoidance
-
+        self.GATE_CONTRACTION_LEN = 0.3  # Meters
+        self.U_turn_extension = 0.25  # Meters
+        self.U_turn_radius = 0.35  # Meters
+        self.gate_approach_dist = 0.5  # Meters
         self.debug_dicts = []
         
         # self.obstacles_pos = self.add_virtual_obstacle(obstacles_pos)
@@ -58,7 +61,7 @@ class GeometryEngine:
         
 
         self.waypoints = self.__initialize_waypoints()
-        # self.waypoints = self.__insert_obstacle_avoidance_waypoints(self.waypoints, clearance_radius=self.CLEARANCE_RADIUS)
+        self.waypoints = self.__insert_obstacle_avoidance_waypoints(self.waypoints, clearance_radius=self.CLEARANCE_RADIUS)
 
         self.spline = self.__get_spline(self.waypoints)
         
@@ -69,7 +72,16 @@ class GeometryEngine:
         num_frame_points = int(max(10, self.total_length * 100))
         self.pt_frame = self._generate_parallel_transport_frame(num_points=num_frame_points)
 
-        self.corridor_map = self.__generate_static_corridor()
+        # self.corridor_map = self.__generate_static_corridor()
+        
+        num_pts = len(self.pt_frame["s"])
+        lb_w1 = np.full(
+            num_pts, -self.MAX_LATERAL_WIDTH
+        )  # left bound which is filled with -max width
+        ub_w1 = np.full(num_pts, self.MAX_LATERAL_WIDTH)
+        
+
+        self.corridor_map = {"lb_w1": lb_w1, "ub_w1": ub_w1}
 
         # self.__print_debug_vectors()
         
@@ -167,9 +179,9 @@ class GeometryEngine:
 
     def __print_debug_vectors(self):
         for i, debug_dict in enumerate(self.debug_dicts):
-            # print(
-            #     f"Debug {i}: Frame Pos: {debug_dict['frame_pos']}, Obstacle: {debug_dict['obs']}, w1_obs: {debug_dict['w1_obs']}, reduced_lb: {debug_dict.get('reduced_lb', 'NA')}, reduced_ub: {debug_dict.get('reduced_ub', 'NA')}, s_knots: {debug_dict['s_knots']}"
-            # )
+            print(
+                f"Debug {i}: Frame Pos: {debug_dict['frame_pos']}, Obstacle: {debug_dict['obs']}, w1_obs: {debug_dict['w1_obs']}, reduced_lb: {debug_dict.get('reduced_lb', 'NA')}, reduced_ub: {debug_dict.get('reduced_ub', 'NA')}, s_knots: {debug_dict['s_knots']} , lb_current: {debug_dict.get('lb_current', 'NA')}, ub_current: {debug_dict.get('ub_current', 'NA')}"
+            )
             pass
         
     def angle_between_vectors(self, v1: NDArray[np.floating], v2: NDArray[np.floating]) -> float:
@@ -185,9 +197,10 @@ class GeometryEngine:
         waypoints = [self.start_pos]
         
         # Tuning parameters for the geometry
-        EXTENSION_DIST = 0.28  # How far to fly straight out after a reversal gate
-        TURN_RADIUS = 0.28    # How wide the U-turn should be
-        APPROACH_DIST = 0.5   # Distance for pre/post gate guidance
+        
+        EXTENSION_DIST = self.U_turn_extension  # How far to fly straight out after a reversal gate
+        TURN_RADIUS = self.U_turn_radius   # How wide the U-turn should be
+        APPROACH_DIST = self.gate_approach_dist  # Distance for pre/post gate guidance
 
         for idx, gate_pos in enumerate(self.gates_pos):
             
@@ -265,6 +278,8 @@ class GeometryEngine:
         w1_obs: float,
         proposed_lb: float,
         proposed_ub: float,
+        lb_current: float = None,
+        ub_current: float = None,
     ):
         self.debug_dicts.append(
             {
@@ -274,6 +289,8 @@ class GeometryEngine:
                 "reduced_lb": f"{proposed_lb:.2f} " if proposed_lb is not None else "None",
                 "reduced_ub": f"{proposed_ub:.2f} " if proposed_ub is not None else "None",
                 "s_knots": f"{self.pt_frame['s'][i]:.2f}",
+                "lb_current": f"{lb_current:.2f}" if lb_current is not None else "None",
+                "ub_current": f"{ub_current:.2f}" if ub_current is not None else "None",
             }
         )
         
@@ -289,6 +306,10 @@ class GeometryEngine:
             num_pts, -self.MAX_LATERAL_WIDTH
         )  # left bound which is filled with -max width
         ub_w1 = np.full(num_pts, self.MAX_LATERAL_WIDTH)
+        lb_w2 = np.full(
+            num_pts, -self.MAX_LATERAL_WIDTH
+        )  # left bound which is filled with -max width
+        ub_w2 = np.full(num_pts, self.MAX_LATERAL_WIDTH)
 
         if len(self.obstacles_pos) == 0:
             return {"lb_w1": lb_w1, "ub_w1": ub_w1}
@@ -297,6 +318,7 @@ class GeometryEngine:
             frame_pos = self.pt_frame["pos"][i]  # the position at frame i
             frame_t = self.pt_frame["t"][i]  # the tangent at frame i
             n1 = self.pt_frame["n1"][i]  # the normal at frame i
+            n2 = self.pt_frame["n2"][i]  # the binormal at frame i
             
                 # --- [NEW] Contract bounds near gates ---
             # self.__contract_for_gates(i, frame_pos, frame_t, {'lb_w1': lb_w1, 'ub_w1': ub_w1})
@@ -312,17 +334,25 @@ class GeometryEngine:
 
             t_2d /= np.linalg.norm(t_2d)  # normalize
             n1_2d = np.array([n1[0], n1[1], 0.0])  # normal vector in 2D
+            n2_2d = np.array([n2[0], n2[1], 0.0])  # binormal vector in 2D
             
             
             for gate_idx, gate_pos in enumerate(self.gates_pos):
                 gate_pos_2d = np.array([gate_pos[0], gate_pos[1], 0.0])
                 r_vec_2d = gate_pos_2d - pos_2d
+                
+                d = np.linalg.norm(r_vec_2d)
                 d_long = np.dot(r_vec_2d, t_2d)  # longitudinal distance along the tangent
                 
-                if abs(d_long) > self.CONTRACTION_LEN:
+                if abs(d_long) > self.GATE_CONTRACTION_LEN:
                     # print(f"[Geometry] Gate {gate_idx} too far from frame {i} for contraction: d_long = {d_long:.2f} m")
-                    pass
+                    continue
+                                
+                if abs(d) > self.GATE_CONTRACTION_LEN:
+                    # print(f"[Geometry] Gate {gate_idx} at {gate_pos_2d} too far from frame {i} for contraction: d = {d:.2f} m")
+                    continue
                 
+                # print(f"[Geometry] Contracting bounds near Gate {gate_idx} at frame {i}: d = {d:.2f} m, d_long = {d_long:.2f} m")
                 # Within contraction length, tighten bounds
                 new_bound = self.gate_size/2 - 0.1
                 
@@ -343,8 +373,8 @@ class GeometryEngine:
                     continue
 
                 w1_obs = np.dot(r_vec_2d, n1_2d)  # lateral distance along the normal
-                if d > self.CONTRACTION_LEN:
-                    pass
+                if abs(d) > self.CONTRACTION_LEN:
+                    continue
 
                 if abs(w1_obs) > (self.MAX_LATERAL_WIDTH + self.SAFETY_RADIUS):  # too far laterally
                     continue
@@ -374,18 +404,18 @@ class GeometryEngine:
                         if proposed_lb > lb_w1[i]:
                             lb_w1[i] = proposed_lb
 
-                    # self.__add_debug_statement(i, frame_pos, obs, w1_obs, proposed_lb, proposed_ub)
+                    self.__add_debug_statement(i, frame_pos, obs, w1_obs, proposed_lb, proposed_ub, lb_w1[i] , ub_w1[i])
 
                 else:
                     if w1_obs >= 0:
                         safe_edge = w1_obs - self.SAFETY_RADIUS
                         if safe_edge < ub_w1[i]:
-                            # self.__add_debug_statement(i, frame_pos, obs, w1_obs, None, safe_edge)
+                            self.__add_debug_statement(i, frame_pos, obs, w1_obs, None, safe_edge, lb_w1[i], ub_w1[i])
                             ub_w1[i] = safe_edge
                     else:
                         safe_edge = w1_obs + self.SAFETY_RADIUS
                         if safe_edge > lb_w1[i]:
-                            # self.__add_debug_statement(i, frame_pos, obs, w1_obs, safe_edge, None)
+                            self.__add_debug_statement(i, frame_pos, obs, w1_obs, safe_edge, None, lb_w1[i], ub_w1[i])
                             lb_w1[i] = safe_edge
 
         collapsed = lb_w1 >= ub_w1
