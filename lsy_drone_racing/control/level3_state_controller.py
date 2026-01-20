@@ -264,7 +264,8 @@ class AdaptiveSplineController(Controller):
             vec = p2 - p1
             norm = np.linalg.norm(vec)
 
-            if norm < 1e-6: continue
+            if norm < 1e-6:
+                continue
 
             # Calculate angle between flight path and current gate normal
             # If we are flying "backwards" relative to the gate normal, angle is high
@@ -288,7 +289,8 @@ class AdaptiveSplineController(Controller):
     def _get_detour_direction(self, v_proj: NDArray, y_axis: NDArray, z_axis: NDArray) -> NDArray:
         """Determines the cardinal direction for a detour based on projection."""
         norm = np.linalg.norm(v_proj)
-        if norm < 1e-6: return y_axis # Default to Right
+        if norm < 1e-6:
+            return y_axis # Default to Right
         
         # Calculate angle in Y-Z plane
         dot_y = np.dot(v_proj, y_axis)
@@ -296,8 +298,10 @@ class AdaptiveSplineController(Controller):
         angle = np.degrees(np.arctan2(dot_z, dot_y))
 
         # Map angle to direction
-        if -90 <= angle < 45: return y_axis    # Right
-        if 45 <= angle < 135: return z_axis    # Top
+        if -90 <= angle < 45:
+            return y_axis    # Right
+        if 45 <= angle < 135:
+            return z_axis    # Top
         return -y_axis                         # Left
 
     def _apply_obstacle_avoidance(self, waypoints: NDArray, obstacles: NDArray) -> Tuple[NDArray, NDArray]:

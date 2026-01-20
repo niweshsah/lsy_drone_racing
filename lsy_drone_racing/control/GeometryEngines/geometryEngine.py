@@ -552,7 +552,8 @@ class GeometryEngine:
                 gate_z_list.append(p[2])
             
             # Separator
-            gate_x.append(None); gate_y_list.append(None)
+            gate_x.append(None)
+            gate_y_list.append(None)
             gate_z_list.append(None)
 
         fig.add_trace(

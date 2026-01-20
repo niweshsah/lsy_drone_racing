@@ -2,7 +2,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import casadi as ca
 import numpy as np
